@@ -1,6 +1,23 @@
 const mongoose = require("mongoose");
 const { Case, Entity, Edge, Pattern } = require("../models");
 const { NotFoundError, ValidationError, BadRequestError } = require("../utils/AppError");
+const {
+  normalizePhone,
+  normalizeVehicle,
+  normalizeEmail,
+  normalizeAccount,
+  normalizeAddress,
+} = require("./identifierNormalizationService");
+const { buildExactCaseHistory } = require("./historicalContextService");
+
+const MAX_HISTORICAL_CASES_PER_IDENTIFIER = 3;
+const CROSS_CASE_IDENTIFIER_TYPES = {
+  phone: { entityField: "normalizedPhones", normalize: normalizePhone },
+  vehicle: { entityField: "normalizedVehicles", normalize: normalizeVehicle },
+  email: { entityField: "normalizedEmails", normalize: normalizeEmail },
+  account: { entityField: "normalizedAccounts", normalize: normalizeAccount },
+  address: { entityField: "normalizedAddresses", normalize: normalizeAddress },
+};
 
 const effectiveStatus = (edge) => edge.reviewStatus || edge.systemStatus || edge.guardrailStatus || "unknown";
 
@@ -73,6 +90,161 @@ const decorateRecurrencePatterns = async (patterns, currentCaseId) => {
   });
 };
 
+const parseExactHistoryItem = (item, currentCaseId) => {
+  if (!item || typeof item.canonicalId !== "string" || typeof item.lastSeenCaseId !== "string") return null;
+  const separator = item.canonicalId.indexOf(":");
+  if (separator < 1) return null;
+  const identifierType = item.canonicalId.slice(0, separator).toLowerCase();
+  const config = CROSS_CASE_IDENTIFIER_TYPES[identifierType];
+  const historicalCaseId = item.lastSeenCaseId.trim();
+  if (!config || !historicalCaseId || historicalCaseId === currentCaseId) return null;
+  const normalizedValue = config.normalize(item.canonicalId.slice(separator + 1));
+  if (!normalizedValue) return null;
+  return {
+    identifierType,
+    normalizedValue,
+    matchedIdentifier: `${identifierType}:${normalizedValue}`,
+    historicalCaseId,
+    entityField: config.entityField,
+  };
+};
+
+/**
+ * Build a read-only historical overlay for the entity graph.
+ *
+ * Every row starts with an exact identifier stored in Case.caseHistory, then
+ * follows only one evidence-bearing relationship from the matching identifier
+ * entity in the referenced historical case. No database edge is created and
+ * no model or investigator status is changed.
+ */
+const buildCrossCaseEvidence = async (currentCaseId, caseHistory) => {
+  const parsed = [];
+  const seenHistory = new Set();
+  const caseCountByIdentifier = new Map();
+
+  for (const item of Array.isArray(caseHistory) ? caseHistory : []) {
+    const match = parseExactHistoryItem(item, currentCaseId);
+    if (!match) continue;
+    const historyKey = `${match.matchedIdentifier}\u0000${match.historicalCaseId}`;
+    if (seenHistory.has(historyKey)) continue;
+    const count = caseCountByIdentifier.get(match.matchedIdentifier) || 0;
+    if (count >= MAX_HISTORICAL_CASES_PER_IDENTIFIER) continue;
+    seenHistory.add(historyKey);
+    caseCountByIdentifier.set(match.matchedIdentifier, count + 1);
+    parsed.push(match);
+  }
+  if (!parsed.length) return [];
+
+  const referencedCaseIds = [...new Set(parsed.map((match) => match.historicalCaseId))];
+  const historicalCases = await Case.find(
+    { caseId: { $in: referencedCaseIds, $ne: currentCaseId } },
+    { caseId: 1, title: 1 }
+  ).lean();
+  const availableCaseIds = new Set((historicalCases || []).map((item) => item.caseId).filter(Boolean));
+  const historicalCaseNameById = new Map((historicalCases || []).map((item) => [
+    item.caseId,
+    typeof item.title === "string" && item.title.trim() ? item.title.trim() : "Historical case",
+  ]));
+  const rows = [];
+  const seenRows = new Set();
+
+  for (const match of parsed) {
+    if (!availableCaseIds.has(match.historicalCaseId)) continue;
+    const identifierQuery = { [match.entityField]: match.normalizedValue };
+    const [currentIdentifierEntities, historicalIdentifierEntities] = await Promise.all([
+      Entity.find(
+        { associatedCases: currentCaseId, ...identifierQuery },
+        { canonicalId: 1 }
+      ).lean(),
+      Entity.find(
+        { associatedCases: match.historicalCaseId, ...identifierQuery },
+        { canonicalId: 1 }
+      ).lean(),
+    ]);
+    if (!currentIdentifierEntities?.length || !historicalIdentifierEntities?.length) continue;
+
+    const historicalIdentifierIds = [...new Set(
+      historicalIdentifierEntities.map((entity) => entity.canonicalId).filter(Boolean)
+    )];
+    const historicalEdges = await Edge.find({
+      associatedCases: match.historicalCaseId,
+      $or: [
+        { source: { $in: historicalIdentifierIds } },
+        { target: { $in: historicalIdentifierIds } },
+      ],
+    }).lean();
+    const evidenceEdges = (historicalEdges || []).filter((edge) =>
+      Array.isArray(edge.evidence) && edge.evidence.length &&
+      (historicalIdentifierIds.includes(edge.source) || historicalIdentifierIds.includes(edge.target))
+    );
+    const otherEntityIds = [...new Set(evidenceEdges.flatMap((edge) => {
+      if (historicalIdentifierIds.includes(edge.source)) return [edge.target];
+      if (historicalIdentifierIds.includes(edge.target)) return [edge.source];
+      return [];
+    }).filter(Boolean))];
+    if (!otherEntityIds.length) continue;
+
+    const otherEntities = await Entity.find({
+      canonicalId: { $in: otherEntityIds },
+      associatedCases: match.historicalCaseId,
+    }, {
+      canonicalId: 1, type: 1, aliases: 1, attributes: 1, confidence: 1,
+    }).lean();
+    const otherEntityById = new Map((otherEntities || []).map((entity) => [entity.canonicalId, entity]));
+
+    for (const currentEntity of currentIdentifierEntities) {
+      if (!currentEntity?.canonicalId) continue;
+      for (const edge of evidenceEdges) {
+        const otherId = historicalIdentifierIds.includes(edge.source) ? edge.target : edge.source;
+        const historicalEntity = otherEntityById.get(otherId);
+        if (!historicalEntity || !otherId || historicalIdentifierIds.includes(otherId)) continue;
+        const originalEdgeId = edge.edgeId || edge._id?.toString();
+        if (!originalEdgeId) continue;
+        const rowKey = [
+          match.matchedIdentifier,
+          match.historicalCaseId,
+          currentEntity.canonicalId,
+          otherId,
+          originalEdgeId,
+        ].join("\u0000");
+        if (seenRows.has(rowKey)) continue;
+        seenRows.add(rowKey);
+
+        const virtualHistoricalId = `historical:${match.historicalCaseId}:${otherId}`;
+        rows.push({
+          id: `cross:${currentCaseId}:${currentEntity.canonicalId}:${match.historicalCaseId}:${originalEdgeId}`,
+          currentEntityId: currentEntity.canonicalId,
+          matchedIdentifier: match.matchedIdentifier,
+          identifierType: match.identifierType,
+          historicalCaseId: match.historicalCaseId,
+          historicalCaseName: historicalCaseNameById.get(match.historicalCaseId) || "Historical case",
+          historicalEntity: {
+            id: virtualHistoricalId,
+            canonicalId: otherId,
+            name: historicalEntity.aliases?.find((alias) => typeof alias === "string" && alias.trim()) || otherId,
+            type: historicalEntity.type,
+            aliases: historicalEntity.aliases || [],
+            attributes: historicalEntity.attributes || {},
+            confidence: historicalEntity.confidence,
+          },
+          historicalRelationship: {
+            edgeId: originalEdgeId,
+            edgeType: edge.edgeType,
+            modelStatus: edge.systemStatus || edge.guardrailStatus || "unknown",
+            confidence: edge.confidence,
+            relationReason: edge.relationReason || null,
+            eventDate: edge.eventDate || null,
+            eventTime: edge.eventTime || null,
+            evidenceIds: edge.evidenceIds || [],
+            evidence: edge.evidence,
+          },
+        });
+      }
+    }
+  }
+  return rows;
+};
+
 /**
  * Retrieve the full graph (nodes + edges) for a given case
  *
@@ -102,6 +274,10 @@ const getCaseGraph = async (caseId) => {
   }).lean();
   const patterns = await Pattern.find({ caseId: normalizedCaseId }).lean();
   const decoratedPatterns = await decorateRecurrencePatterns(patterns, normalizedCaseId);
+  const exactCaseHistory = Array.isArray(caseDoc.caseHistory) && caseDoc.caseHistory.length
+    ? caseDoc.caseHistory
+    : await buildExactCaseHistory(normalizedCaseId, caseDoc.normalizedIdentifiers || {});
+  const crossCaseEvidence = await buildCrossCaseEvidence(normalizedCaseId, exactCaseHistory);
 
   const nodes = entities.map((entity) => ({
     canonicalId: entity.canonicalId,
@@ -126,6 +302,7 @@ const getCaseGraph = async (caseId) => {
     nodes,
     edges: mappedEdges,
     patterns: decoratedPatterns,
+    crossCaseEvidence,
   };
 };
 
@@ -391,4 +568,5 @@ module.exports = {
   getGuardrailDetail,
   getCasesList,
   decorateRecurrencePatterns,
+  buildCrossCaseEvidence,
 };

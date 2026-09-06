@@ -3,7 +3,9 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import apiClient from '../api/apiClient.js';
 import { useAuth } from '../state/authContext.jsx';
 import NetworkGraph from '../components/graph/NetworkGraph.jsx';
+import { shouldShowCrossCaseEvidenceByDefault } from '../components/graph/graphPresentation.js';
 import { useEntityLookup } from '../hooks/useEntityLookup.js';
+import { caseDetailPath } from '../utils/caseNavigation.js';
 
 const CARD_SHADOW =
   '0 0 0 1px rgba(0,0,0,0.08), 0px 2px 2px rgba(0,0,0,0.04), 0px 8px 16px -4px rgba(0,0,0,0.04)';
@@ -388,7 +390,7 @@ const RELATIONSHIP_TYPE_OPTIONS = [
   ['co-mention', 'Co-mention'],
 ];
 
-export function CrossCaseRecurrenceAlert({ patterns, nodes, navigate, currentCaseId }) {
+export function CrossCaseRecurrenceAlert({ patterns, nodes, navigate, currentCaseId, onHighlightMatch }) {
   const recurrences = (Array.isArray(patterns) ? patterns : [])
     .filter((pattern) => pattern?.patternType === 'cross_case_recurrence');
   if (!recurrences.length) return null;
@@ -439,9 +441,20 @@ export function CrossCaseRecurrenceAlert({ patterns, nodes, navigate, currentCas
         <ul className="mt-4 divide-y divide-[#d8ccf1] overflow-hidden rounded-lg border border-[#d8ccf1] bg-white">
           {matches.map((match) => (
             <li key={`${match.type}-${match.canonicalId}`} className="px-4 py-3">
-              <p className="text-sm font-medium text-[#171717]">
-                {nodeNames.get(match.canonicalId) || match.canonicalId}
-              </p>
+              {onHighlightMatch ? (
+                <button
+                  type="button"
+                  onClick={() => onHighlightMatch(match.canonicalId)}
+                  className="text-left text-sm font-medium text-[#0761d1] underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0761d1]"
+                  aria-label={`Show historical graph evidence for ${match.canonicalId}`}
+                >
+                  {nodeNames.get(match.canonicalId) || match.canonicalId}
+                </button>
+              ) : (
+                <p className="text-sm font-medium text-[#171717]">
+                  {nodeNames.get(match.canonicalId) || match.canonicalId}
+                </p>
+              )}
               <p className="mt-0.5 break-all font-mono text-xs text-[#888888]">{match.canonicalId}</p>
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 {match.historicalCases.length ? match.historicalCases.map((reference) => (
@@ -449,7 +462,7 @@ export function CrossCaseRecurrenceAlert({ patterns, nodes, navigate, currentCas
                     <button
                       key={reference.caseId}
                       type="button"
-                      onClick={() => navigate(`/cases/${encodeURIComponent(reference.caseId)}`)}
+                      onClick={() => navigate(caseDetailPath(reference.caseId))}
                       className="h-8 rounded-md border border-[#ebebeb] bg-white px-3 text-sm font-medium text-[#0761d1] transition-colors hover:bg-[#f5f5f5]"
                     >
                       Open case {reference.caseId}
@@ -472,6 +485,83 @@ export function CrossCaseRecurrenceAlert({ patterns, nodes, navigate, currentCas
         </p>
       )}
     </section>
+  );
+}
+
+export function CrossCaseEvidenceDetail({ evidence, unavailable, onOpenCase, onClose }) {
+  if (!evidence) return null;
+  const relationship = evidence.historicalRelationship || {};
+  const confidence = typeof relationship.confidence === 'number'
+    ? `${Math.round(relationship.confidence * 100)}%`
+    : 'Unknown';
+  const evidenceItems = Array.isArray(relationship.evidence) ? relationship.evidence : [];
+  return (
+    <aside className="border-t border-[#ebebeb] bg-[#fafafa] px-6 py-5" aria-label="Historical cross-case evidence details">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="font-mono text-xs uppercase tracking-wide text-[#6d28d9]">Historical cross-case evidence</p>
+          <h3 className="mt-1 text-base font-semibold text-[#171717]">{evidence.historicalEntity?.name || 'Historical entity'}</h3>
+        </div>
+        <button type="button" onClick={onClose} className="rounded-md border border-[#ebebeb] bg-white px-3 py-1.5 text-sm text-[#4d4d4d] hover:bg-[#f5f5f5]">Close</button>
+      </div>
+      <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+        <div><dt className="font-mono text-xs text-[#888888]">Historical case</dt><dd className="mt-1 text-[#171717]">{evidence.historicalCaseId || 'Unavailable'}</dd></div>
+        <div><dt className="font-mono text-xs text-[#888888]">Matched identifier</dt><dd className="mt-1 break-all text-[#171717]">{evidence.matchedIdentifier || 'Unknown'}</dd></div>
+        <div><dt className="font-mono text-xs text-[#888888]">Original relationship</dt><dd className="mt-1 text-[#171717]">{friendlyLabel(relationship.edgeType || 'unknown')}</dd></div>
+        <div><dt className="font-mono text-xs text-[#888888]">Original model status</dt><dd className="mt-1 text-[#171717]">{friendlyLabel(relationship.modelStatus || 'unknown')}</dd></div>
+        <div><dt className="font-mono text-xs text-[#888888]">Confidence</dt><dd className="mt-1 text-[#171717]">{confidence}</dd></div>
+        <div><dt className="font-mono text-xs text-[#888888]">Event date</dt><dd className="mt-1 text-[#171717]">{[relationship.eventDate, relationship.eventTime].filter(Boolean).join(' ') || 'Undated'}</dd></div>
+      </dl>
+      {relationship.relationReason && <p className="mt-4 text-sm leading-6 text-[#4d4d4d]">{relationship.relationReason}</p>}
+      {evidenceItems.length > 0 && (
+        <div className="mt-4 rounded-md border border-[#ebebeb] bg-white px-4 py-3">
+          <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Original relationship evidence</p>
+          <ul className="mt-2 space-y-2 text-sm text-[#4d4d4d]">
+            {evidenceItems.map((item, index) => (
+              <li key={`${item?.sourceReportId || 'evidence'}-${index}`}>
+                {[item?.sourceReportId, item?.matchedField, friendlyValue(item?.record)].filter(Boolean).join(' · ')}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <div className="mt-4 flex items-center gap-3">
+        <button
+          type="button"
+          disabled={!evidence.historicalCaseId}
+          onClick={() => onOpenCase(evidence.historicalCaseId)}
+          className="h-9 rounded-md bg-[#171717] px-4 text-sm font-medium text-white hover:bg-black disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Open historical case
+        </button>
+        {unavailable && <p role="alert" className="text-sm text-[#c50000]">Referenced case unavailable</p>}
+      </div>
+      <p className="mt-3 text-xs text-[#888888]">Read-only historical evidence. This does not change any relationship status.</p>
+    </aside>
+  );
+}
+
+export function GraphEvidenceToggle({ available, shown, onChange }) {
+  return (
+    <div className="flex rounded-md border border-[#ebebeb] bg-[#fafafa] p-0.5" role="group" aria-label="Graph evidence view">
+      <button
+        type="button"
+        aria-pressed={!shown}
+        onClick={() => onChange(false)}
+        className={`rounded px-3 py-1.5 text-xs font-medium ${!shown ? 'bg-white text-[#171717] shadow-sm' : 'text-[#666666]'}`}
+      >
+        Current case
+      </button>
+      <button
+        type="button"
+        aria-pressed={shown}
+        disabled={!available}
+        onClick={() => onChange(true)}
+        className={`rounded px-3 py-1.5 text-xs font-medium ${shown ? 'bg-white text-[#6d28d9] shadow-sm' : 'text-[#666666]'} disabled:cursor-not-allowed disabled:opacity-40`}
+      >
+        Show cross-case evidence
+      </button>
+    </div>
   );
 }
 
@@ -963,6 +1053,10 @@ export default function CaseDetailPage() {
   const [guardrailFetchStatus, setGuardrailFetchStatus] = useState('idle');
   const [guardrailData, setGuardrailData] = useState(null);
   const [guardrailError, setGuardrailError] = useState('');
+  const [showCrossCaseEvidence, setShowCrossCaseEvidence] = useState(false);
+  const [focusedGraphNodeId, setFocusedGraphNodeId] = useState(null);
+  const [selectedCrossCaseEvidence, setSelectedCrossCaseEvidence] = useState(null);
+  const [historicalCaseUnavailable, setHistoricalCaseUnavailable] = useState(false);
 
   // Timeline scrubber state
   const [activeTimeRange, setActiveTimeRange] = useState(null);
@@ -990,9 +1084,15 @@ export default function CaseDetailPage() {
     setFetchStatus('loading');
     setErrorMessage('');
     setNotFound(false);
+    setShowCrossCaseEvidence(false);
+    setFocusedGraphNodeId(null);
+    setSelectedCrossCaseEvidence(null);
+    setHistoricalCaseUnavailable(false);
     try {
       const res = await apiClient.get(`/cases/${encodeURIComponent(caseId)}/graph`);
-      setGraphData(res.data?.data ?? null);
+      const payload = res.data?.data ?? null;
+      setGraphData(payload);
+      setShowCrossCaseEvidence(shouldShowCrossCaseEvidenceByDefault(payload));
       setFetchStatus('ready');
     } catch (err) {
       const errorCode = err.response?.data?.error?.code;
@@ -1146,10 +1246,20 @@ export default function CaseDetailPage() {
   const handleBackgroundClick = useCallback(() => {
     closeEntityPanel();
     closeGuardrailPanel();
+    setSelectedCrossCaseEvidence(null);
+    setFocusedGraphNodeId(null);
   }, [closeEntityPanel, closeGuardrailPanel]);
 
   const handleNodeClick = useCallback(
     (_event, node) => {
+      if (node?.isHistoricalEvidence && node?.crossCaseEvidence) {
+        closeEntityPanel();
+        closeGuardrailPanel();
+        setHistoricalCaseUnavailable(false);
+        setSelectedCrossCaseEvidence(node.crossCaseEvidence);
+        return;
+      }
+      setSelectedCrossCaseEvidence(null);
       const entityId = node?.canonicalId || node?.id;
       if (!entityId || typeof entityId !== 'string') return;
       
@@ -1169,6 +1279,14 @@ export default function CaseDetailPage() {
 
   const handleEdgeClick = useCallback(
     (_event, edge) => {
+      if (edge?.isCrossCaseEvidence && edge?.crossCaseEvidence) {
+        closeEntityPanel();
+        closeGuardrailPanel();
+        setHistoricalCaseUnavailable(false);
+        setSelectedCrossCaseEvidence(edge.crossCaseEvidence);
+        return;
+      }
+      setSelectedCrossCaseEvidence(null);
       const edgeId = edge?.id;
       if (!edgeId || typeof edgeId !== 'string') return;
       
@@ -1185,6 +1303,22 @@ export default function CaseDetailPage() {
     },
     [fetchGuardrail, selectedEdgeId, closeGuardrailPanel, closeEntityPanel]
   );
+
+  const openHistoricalCase = useCallback(async (historicalCaseId) => {
+    const path = caseDetailPath(historicalCaseId);
+    if (!path) {
+      setHistoricalCaseUnavailable(true);
+      return;
+    }
+    setHistoricalCaseUnavailable(false);
+    try {
+      await apiClient.get(`${path}/graph`);
+      navigate(path);
+    } catch (error) {
+      if (error.response?.status === 404) setHistoricalCaseUnavailable(true);
+      else alert(error.response?.data?.error?.message || 'Could not open the referenced case.');
+    }
+  }, [navigate]);
 
   const handleTimelineStatusChange = useCallback((edgeId, newStatus, saved) => {
     const updateEdge = (edge) => {
@@ -1404,6 +1538,10 @@ export default function CaseDetailPage() {
               nodes={graphData?.nodes || []}
               navigate={navigate}
               currentCaseId={caseId}
+              onHighlightMatch={(canonicalId) => {
+                setShowCrossCaseEvidence(true);
+                setFocusedGraphNodeId(canonicalId);
+              }}
             />
 
             <ManualRelationshipForm
@@ -1421,25 +1559,46 @@ export default function CaseDetailPage() {
               className="mt-8 overflow-hidden rounded-xl bg-white"
               style={{ boxShadow: CARD_SHADOW }}
             >
-              <div className="flex items-center justify-between border-b border-[#ebebeb] px-6 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#ebebeb] px-6 py-3">
                 <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">
                   GET /api/cases/:caseId/graph
                 </p>
-                <p className="hidden font-mono text-xs text-[#888888] sm:block">
-                  {graph.flowNodes.length} entities · {graph.flowEdges.length} relationships
-                </p>
+                <div className="flex flex-wrap items-center gap-4">
+                  <GraphEvidenceToggle
+                    available={Boolean(graphData?.crossCaseEvidence?.length)}
+                    shown={showCrossCaseEvidence}
+                    onChange={(shown) => {
+                      setShowCrossCaseEvidence(shown);
+                      if (!shown) {
+                        setFocusedGraphNodeId(null);
+                        setSelectedCrossCaseEvidence(null);
+                      }
+                    }}
+                  />
+                  <p className="hidden font-mono text-xs text-[#888888] sm:block">
+                    {graph.flowNodes.length} entities · {graph.flowEdges.length} relationships
+                  </p>
+                </div>
               </div>
               <div className="h-[560px] w-full">
                 <NetworkGraph 
-                  graphData={{ nodes: graphData?.nodes || [], edges: graphData?.edges || [] }}
-                  onNodeClick={(id) => handleNodeClick(null, { id })}
-                  onEdgeClick={(id) => handleEdgeClick(null, { id })}
+                  graphData={{ nodes: graphData?.nodes || [], edges: graphData?.edges || [], crossCaseEvidence: graphData?.crossCaseEvidence || [] }}
+                  onNodeClick={(id, node) => handleNodeClick(null, node || { id })}
+                  onEdgeClick={(id, edge) => handleEdgeClick(null, edge || { id })}
                   onBackgroundClick={handleBackgroundClick}
                   activeTimeRange={activeTimeRange}
                   currentCaseId={caseId}
                   selectedEdgeId={selectedEdgeId}
+                  showCrossCaseEvidence={showCrossCaseEvidence}
+                  focusedNodeId={focusedGraphNodeId}
                 />
               </div>
+              <CrossCaseEvidenceDetail
+                evidence={selectedCrossCaseEvidence}
+                unavailable={historicalCaseUnavailable}
+                onOpenCase={openHistoricalCase}
+                onClose={() => setSelectedCrossCaseEvidence(null)}
+              />
               {edgeTimeBounds && (
                 <TimelineScrubber
                   bounds={edgeTimeBounds}

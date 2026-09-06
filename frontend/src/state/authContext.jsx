@@ -1,14 +1,16 @@
-import { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
 import apiClient from '../api/apiClient.js';
+import {
+  clearStoredAuthSession,
+  getStoredAuthSession,
+  SESSION_EXPIRED_EVENT,
+} from './authSession.js';
 
 const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
-  const [token, setToken] = useState(() => sessionStorage.getItem('auth_token'));
-  const [user, setUser] = useState(() => {
-    const stored = sessionStorage.getItem('auth_user');
-    return stored ? JSON.parse(stored) : null;
-  });
+  const [session, setSession] = useState(getStoredAuthSession);
+  const { token, user } = session;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -27,8 +29,7 @@ export function AuthProvider({ children }) {
       const authedUser = { username: username.toLowerCase().trim() };
       sessionStorage.setItem('auth_token', jwt);
       sessionStorage.setItem('auth_user', JSON.stringify(authedUser));
-      setToken(jwt);
-      setUser(authedUser);
+      setSession({ token: jwt, user: authedUser });
       return true;
     } catch (err) {
       let message;
@@ -54,11 +55,14 @@ export function AuthProvider({ children }) {
   }, []);
 
   const logout = useCallback(() => {
-    sessionStorage.removeItem('auth_token');
-    sessionStorage.removeItem('auth_user');
-    setToken(null);
-    setUser(null);
+    clearStoredAuthSession();
+    setSession({ token: null, user: null });
   }, []);
+
+  useEffect(() => {
+    window.addEventListener(SESSION_EXPIRED_EVENT, logout);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, logout);
+  }, [logout]);
 
   return (
     <AuthContext.Provider value={{ token, user, loading, error, login, logout }}>
