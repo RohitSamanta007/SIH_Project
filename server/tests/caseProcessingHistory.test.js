@@ -1,7 +1,7 @@
 "use strict";
 
 jest.mock("../src/models", () => ({
-  Case: { findOneAndUpdate: jest.fn(), updateOne: jest.fn() },
+  Case: { findOne: jest.fn(), findOneAndUpdate: jest.fn(), updateOne: jest.fn() },
 }));
 jest.mock("../src/services/identifierNormalizationService", () => ({
   extractIdentifiersFromCase: jest.fn(),
@@ -38,6 +38,7 @@ describe("case processing exact-history orchestration", () => {
     extractIdentifiersFromCase.mockReturnValue(identifiers);
     buildExactCaseHistory.mockResolvedValue(caseHistory);
     buildRetrievalContext.mockResolvedValue([{ caseId: "ALPHA-01", matchType: "exact" }]);
+    Case.findOne.mockReturnValue({ lean: jest.fn().mockResolvedValue(null) });
     Case.findOneAndUpdate.mockResolvedValue(null);
     callFastAPI.mockResolvedValue({
       caseId: "ALPHA-NEW", entities: [], relationships: [], guardrail: [], timelineEvents: [],
@@ -69,5 +70,30 @@ describe("case processing exact-history orchestration", () => {
         }),
       })],
     }), expect.objectContaining({ normalizedIdentifiers: identifiers, caseHistory }));
+  });
+
+  test("reprocessing preserves the original creation-time history boundary", async () => {
+    const createdAt = new Date("2026-04-01T10:00:00.000Z");
+    const identifiers = { phones: ["9050011122"], vehicles: [], emails: [], accounts: [], addresses: [] };
+    extractIdentifiersFromCase.mockReturnValue(identifiers);
+    Case.findOne.mockReturnValue({ lean: jest.fn().mockResolvedValue({ createdAt }) });
+    buildExactCaseHistory.mockResolvedValue([]);
+    buildRetrievalContext.mockResolvedValue([]);
+    Case.findOneAndUpdate.mockResolvedValue({ caseId: "ALPHA-01" });
+    callFastAPI.mockResolvedValue({
+      caseId: "ALPHA-01", entities: [], relationships: [], patterns: [],
+      guardrail: [], timelineEvents: [], similarCaseLeads: [],
+    });
+    persistCaseResults.mockResolvedValue({ caseId: "ALPHA-01", status: "completed", summary: {} });
+
+    await processCaseThroughFastApi({
+      caseId: "ALPHA-01", textReports: ["Phone 9050011122"], csvRecords: [],
+    });
+
+    expect(buildExactCaseHistory).toHaveBeenCalledWith(
+      "ALPHA-01",
+      identifiers,
+      { beforeCreatedAt: createdAt }
+    );
   });
 });

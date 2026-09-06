@@ -30,11 +30,15 @@ function normalizeIdentifierInput(value = {}) {
   ]));
 }
 
-function buildCaseExactQuery(currentCaseId, identifiers) {
+function buildCaseExactQuery(currentCaseId, identifiers, beforeCreatedAt = null) {
   const conditions = IDENTIFIER_TYPES
     .filter(({ plural }) => identifiers[plural].length)
     .map(({ plural }) => ({ [`normalizedIdentifiers.${plural}`]: { $in: identifiers[plural] } }));
-  return conditions.length ? { caseId: { $ne: currentCaseId }, $or: conditions } : null;
+  return conditions.length ? {
+    caseId: { $ne: currentCaseId },
+    ...(beforeCreatedAt ? { createdAt: { $lt: beforeCreatedAt } } : {}),
+    $or: conditions,
+  } : null;
 }
 
 function matchedByType(caseDoc, identifiers) {
@@ -48,9 +52,11 @@ function matchedByType(caseDoc, identifiers) {
   return result;
 }
 
-async function buildExactCaseHistory(currentCaseId, normalizedIdentifiers) {
+async function buildExactCaseHistory(currentCaseId, normalizedIdentifiers, options = {}) {
   const identifiers = normalizeIdentifierInput(normalizedIdentifiers);
-  const caseQuery = buildCaseExactQuery(currentCaseId, identifiers);
+  const beforeCreatedAt = options?.beforeCreatedAt ? new Date(options.beforeCreatedAt) : null;
+  const validCutoff = beforeCreatedAt && !Number.isNaN(beforeCreatedAt.getTime()) ? beforeCreatedAt : null;
+  const caseQuery = buildCaseExactQuery(currentCaseId, identifiers, validCutoff);
   if (!caseQuery) return [];
   const matches = [];
   const seen = new Set();
@@ -63,7 +69,7 @@ async function buildExactCaseHistory(currentCaseId, normalizedIdentifiers) {
     matches.push({ canonicalId: `${type}:${value}`, type: historyType, lastSeenCaseId: historicalCaseId });
   };
 
-  const historicalCases = await Case.find(caseQuery, { caseId: 1, normalizedIdentifiers: 1 }).lean();
+  const historicalCases = await Case.find(caseQuery, { caseId: 1, normalizedIdentifiers: 1, createdAt: 1 }).lean();
   for (const caseDoc of historicalCases || []) {
     for (const [type, values] of matchedByType(caseDoc, identifiers)) {
       values.forEach((value) => add(type, value, caseDoc.caseId));
@@ -80,12 +86,25 @@ async function buildExactCaseHistory(currentCaseId, normalizedIdentifiers) {
     associatedCases: 1, normalizedPhones: 1, normalizedVehicles: 1,
     normalizedEmails: 1, normalizedAccounts: 1, normalizedAddresses: 1,
   }).lean() : [];
+  let eligibleLegacyCaseIds = null;
+  if (validCutoff && legacyEntities.length) {
+    const associatedCaseIds = uniqueStrings(legacyEntities.flatMap((entity) => entity.associatedCases || []))
+      .filter((caseId) => caseId !== currentCaseId);
+    const eligibleCases = associatedCaseIds.length ? await Case.find({
+      caseId: { $in: associatedCaseIds, $ne: currentCaseId },
+      createdAt: { $lt: validCutoff },
+    }, { caseId: 1 }).lean() : [];
+    eligibleLegacyCaseIds = new Set((eligibleCases || []).map((caseDoc) => caseDoc.caseId).filter(Boolean));
+  }
   for (const entity of legacyEntities || []) {
     for (const { type, plural, entityField } of IDENTIFIER_TYPES) {
       const current = new Set(identifiers[plural]);
       for (const value of entity[entityField] || []) {
         if (!current.has(value)) continue;
-        for (const historicalCaseId of entity.associatedCases || []) add(type, value, historicalCaseId);
+        for (const historicalCaseId of entity.associatedCases || []) {
+          if (eligibleLegacyCaseIds && !eligibleLegacyCaseIds.has(historicalCaseId)) continue;
+          add(type, value, historicalCaseId);
+        }
       }
     }
   }

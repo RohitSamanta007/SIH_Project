@@ -95,4 +95,37 @@ describe("historical exact evidence", () => {
     expect(history.some((entry) => entry.lastSeenCaseId === "ALPHA-NEW")).toBe(false);
     expect(history.filter((entry) => entry.canonicalId === "phone:9050011122" && entry.lastSeenCaseId === "ALPHA-01")).toHaveLength(1);
   });
+
+  test("legacy reconstruction excludes cases created after the open case", async () => {
+    const cutoff = new Date("2026-04-02T10:00:00.000Z");
+    Case.find
+      .mockReturnValueOnce(leanQuery([{
+        caseId: "OLDER-CASE",
+        createdAt: new Date("2026-04-01T10:00:00.000Z"),
+        normalizedIdentifiers: { phones: ["9012345678"] },
+      }]))
+      .mockReturnValueOnce(leanQuery([{ caseId: "OLDER-CASE" }]));
+    Entity.find.mockReturnValue(leanQuery([{
+      associatedCases: ["OLDER-CASE", "CURRENT-CASE", "LATER-CASE"],
+      normalizedPhones: ["9012345678"],
+    }]));
+
+    const result = await buildExactCaseHistory(
+      "CURRENT-CASE",
+      { phones: ["9012345678"] },
+      { beforeCreatedAt: cutoff }
+    );
+
+    expect(Case.find.mock.calls[0][0]).toEqual(expect.objectContaining({
+      caseId: { $ne: "CURRENT-CASE" },
+      createdAt: { $lt: cutoff },
+    }));
+    expect(Case.find.mock.calls[1][0]).toEqual({
+      caseId: { $in: ["OLDER-CASE", "LATER-CASE"], $ne: "CURRENT-CASE" },
+      createdAt: { $lt: cutoff },
+    });
+    expect(result).toEqual([
+      { canonicalId: "phone:9012345678", type: "phone", lastSeenCaseId: "OLDER-CASE" },
+    ]);
+  });
 });
