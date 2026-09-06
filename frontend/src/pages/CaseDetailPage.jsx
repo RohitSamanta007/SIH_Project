@@ -150,7 +150,6 @@ export function TimelineEventRow({ event, index, getEntityName, onClick, caseId,
   const source = typeof event?.source === 'string' ? event.source.trim() : '';
   const target = typeof event?.target === 'string' ? event.target.trim() : '';
   const edgeType = typeof event?.edgeType === 'string' ? event.edgeType.trim() : '';
-  const evidence = Array.isArray(event?.evidence) ? event.evidence : [];
   const sourceName = getEntityName(source);
   const targetName = getEntityName(target);
   const dct = event?.displayConnectionType || event?.effectiveStatus || 'unknown';
@@ -284,31 +283,6 @@ export function TimelineEventRow({ event, index, getEntityName, onClick, caseId,
             </div>
           )}
 
-          {/* Evidence */}
-          <div>
-            <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">
-              Evidence · {evidence.length}
-            </p>
-            {evidence.length === 0 ? (
-              <p className="mt-1 text-sm text-[#4d4d4d]">No evidence records.</p>
-            ) : (
-              <ol className="mt-2 space-y-2">
-                {evidence.map((item, idx) => (
-                  <li key={idx} className="rounded-md border border-[#ebebeb] bg-white px-3 py-3">
-                    {item?.sourceReportId && (
-                      <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">
-                        Source: {item.sourceReportId}
-                      </p>
-                    )}
-                    {item?.matchedField && (
-                      <p className="mt-1 font-mono text-xs text-[#171717]">Field: {item.matchedField}</p>
-                    )}
-                  </li>
-                ))}
-              </ol>
-            )}
-          </div>
-
         </div>
       )}
     </li>
@@ -413,6 +387,93 @@ const RELATIONSHIP_TYPE_OPTIONS = [
   ['telecom_link', 'Telecom link'],
   ['co-mention', 'Co-mention'],
 ];
+
+export function CrossCaseRecurrenceAlert({ patterns, nodes, navigate, currentCaseId }) {
+  const recurrences = (Array.isArray(patterns) ? patterns : [])
+    .filter((pattern) => pattern?.patternType === 'cross_case_recurrence');
+  if (!recurrences.length) return null;
+
+  const nodeNames = new Map((Array.isArray(nodes) ? nodes : []).map((node) => {
+    const alias = Array.isArray(node?.aliases)
+      ? node.aliases.find((value) => typeof value === 'string' && value.trim())
+      : null;
+    return [node?.canonicalId, alias || node?.canonicalId];
+  }));
+  const matches = [];
+  const seen = new Set();
+  for (const pattern of recurrences) {
+    const exactMatches = Array.isArray(pattern.metadata?.exactMatches) ? pattern.metadata.exactMatches : [];
+    for (const match of exactMatches) {
+      if (!match?.canonicalId) continue;
+      const historicalCases = Array.isArray(match.historicalCases)
+        ? match.historicalCases
+        : (Array.isArray(match.historicalCaseIds)
+          ? match.historicalCaseIds.map((caseId) => ({ caseId, available: true }))
+          : []);
+      const filteredCases = historicalCases.filter((item) =>
+        typeof item?.caseId === 'string' && item.caseId && item.caseId !== currentCaseId
+      );
+      const key = `${match.canonicalId}:${filteredCases.map((item) => item.caseId).join(',')}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      matches.push({ ...match, historicalCases: filteredCases });
+    }
+  }
+
+  return (
+    <section
+      role="alert"
+      aria-label="Cross-case recurrence"
+      className="mt-8 rounded-xl border border-[#d8ccf1] bg-[#f8f5ff] px-6 py-5"
+      style={{ boxShadow: CARD_SHADOW }}
+    >
+      <p className="font-mono text-xs uppercase tracking-wide text-[#6d28d9]">Cross-case recurrence</p>
+      <h2 className="mt-2 text-lg font-semibold tracking-[-0.4px] text-[#171717]">
+        Exact identifiers appeared in earlier cases
+      </h2>
+      <p className="mt-1 text-sm leading-5 text-[#4d4d4d]">
+        This is an entity-level alert. It does not create or verify a graph connection automatically.
+      </p>
+
+      {matches.length ? (
+        <ul className="mt-4 divide-y divide-[#d8ccf1] overflow-hidden rounded-lg border border-[#d8ccf1] bg-white">
+          {matches.map((match) => (
+            <li key={`${match.type}-${match.canonicalId}`} className="px-4 py-3">
+              <p className="text-sm font-medium text-[#171717]">
+                {nodeNames.get(match.canonicalId) || match.canonicalId}
+              </p>
+              <p className="mt-0.5 break-all font-mono text-xs text-[#888888]">{match.canonicalId}</p>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {match.historicalCases.length ? match.historicalCases.map((reference) => (
+                  reference.available ? (
+                    <button
+                      key={reference.caseId}
+                      type="button"
+                      onClick={() => navigate(`/cases/${encodeURIComponent(reference.caseId)}`)}
+                      className="h-8 rounded-md border border-[#ebebeb] bg-white px-3 text-sm font-medium text-[#0761d1] transition-colors hover:bg-[#f5f5f5]"
+                    >
+                      Open case {reference.caseId}
+                    </button>
+                  ) : (
+                    <span key={reference.caseId} className="rounded-md bg-[#f5f5f5] px-3 py-1.5 text-sm text-[#888888]">
+                      {reference.caseId}: Referenced case unavailable
+                    </span>
+                  )
+                )) : (
+                  <span className="text-sm text-[#888888]">Referenced case unavailable</span>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-4 text-sm text-[#888888]">
+          Exact recurrence was detected, but historical case references were not returned.
+        </p>
+      )}
+    </section>
+  );
+}
 
 export function ManualRelationshipForm({ caseId, nodes, onCreated }) {
   const availableNodes = Array.isArray(nodes)
@@ -586,12 +647,8 @@ export function TimelineScrubber({ bounds, activeRange, onChange }) {
     const rect = trackRef.current?.getBoundingClientRect();
     if (!rect || rect.width <= 0) return;
     const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    const target = bounds.min + ratio * (bounds.max - bounds.min);
-    let nearest = 0;
-    timestamps.forEach((timestamp, index) => {
-      if (Math.abs(timestamp - target) < Math.abs(timestamps[nearest] - target)) nearest = index;
-    });
-    selectIndex(nearest);
+    const nearestIndex = Math.round(ratio * (timestamps.length - 1));
+    selectIndex(nearestIndex);
   };
 
   if (timestamps.length === 0) {
@@ -603,8 +660,7 @@ export function TimelineScrubber({ bounds, activeRange, onChange }) {
     );
   }
   const displayEnd = fmtDate(timestamps[currentIndex]);
-  const totalMs = bounds.max - bounds.min;
-  const progress = totalMs === 0 ? 0 : ((timestamps[currentIndex] - bounds.min) / totalMs) * 100;
+  const progress = timestamps.length <= 1 ? 0 : (currentIndex / (timestamps.length - 1)) * 100;
 
   return (
     <div className="px-6 py-4 border-t border-[#ebebeb] bg-[#fafafa]">
@@ -665,7 +721,7 @@ export function TimelineScrubber({ bounds, activeRange, onChange }) {
         <div className="absolute w-full h-1.5 rounded-full bg-[#ebebeb]" />
         <div className="absolute h-1.5 rounded-full bg-[#0761d1]" style={{ left: 0, width: `${progress}%` }} />
         {timestamps.map((ts, idx) => {
-          const pct = totalMs === 0 ? 0 : ((ts - bounds.min) / totalMs) * 100;
+          const pct = timestamps.length <= 1 ? 0 : (idx / (timestamps.length - 1)) * 100;
           return (
             <div 
               key={`tick-${idx}`}
@@ -1343,6 +1399,13 @@ export default function CaseDetailPage() {
               </div>
             )}
 
+            <CrossCaseRecurrenceAlert
+              patterns={graphData?.patterns || []}
+              nodes={graphData?.nodes || []}
+              navigate={navigate}
+              currentCaseId={caseId}
+            />
+
             <ManualRelationshipForm
               caseId={caseId}
               nodes={graphData?.nodes || []}
@@ -1369,7 +1432,6 @@ export default function CaseDetailPage() {
               <div className="h-[560px] w-full">
                 <NetworkGraph 
                   graphData={{ nodes: graphData?.nodes || [], edges: graphData?.edges || [] }}
-                  patterns={graphData?.patterns || []}
                   onNodeClick={(id) => handleNodeClick(null, { id })}
                   onEdgeClick={(id) => handleEdgeClick(null, { id })}
                   onBackgroundClick={handleBackgroundClick}
@@ -1877,32 +1939,6 @@ export default function CaseDetailPage() {
                       <FriendlyFields values={guardrailData.edge.attributes} />
                     </div>
                   )}
-                  <div>
-                    <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">
-                      Evidence · {Array.isArray(guardrailData.edge.evidence) ? guardrailData.edge.evidence.length : 0}
-                    </p>
-                    {Array.isArray(guardrailData.edge.evidence) && guardrailData.edge.evidence.length === 0 ? (
-                      <p className="mt-2 text-sm text-[#4d4d4d]">No evidence records.</p>
-                    ) : (
-                      <ol className="mt-3 space-y-3">
-                        {guardrailData.edge.evidence.map((item, idx) => (
-                          <li key={idx} className="rounded-md border border-[#ebebeb] bg-[#fafafa] px-3 py-3">
-                            {typeof item?.sourceReportId === 'string' && item.sourceReportId.trim() && (
-                              <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">
-                                Source Report: {item.sourceReportId}
-                              </p>
-                            )}
-                            {typeof item?.matchedField === 'string' && item.matchedField.trim() && (
-                              <p className="mt-1 font-mono text-xs text-[#171717]">Matched Field: {item.matchedField}</p>
-                            )}
-                            {item?.record !== undefined && (
-                              <p className="mt-2 text-sm text-[#4d4d4d]">{friendlyValue(item.record)}</p>
-                            )}
-                          </li>
-                        ))}
-                      </ol>
-                    )}
-                  </div>
                 </div>
               </div>
             )}

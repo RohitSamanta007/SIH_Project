@@ -22,7 +22,12 @@ function uniqueStrings(values) {
 }
 
 function normalizeIdentifierInput(value = {}) {
-  return Object.fromEntries(IDENTIFIER_TYPES.map(({ plural }) => [plural, uniqueStrings(value[plural])]));
+  return Object.fromEntries(IDENTIFIER_TYPES.map(({ plural, normalize }) => [
+    plural,
+    uniqueStrings((Array.isArray(value[plural]) ? value[plural] : [])
+      .map((item) => normalize(String(item)))
+      .filter(Boolean)),
+  ]));
 }
 
 function buildCaseExactQuery(currentCaseId, identifiers) {
@@ -70,7 +75,7 @@ async function buildExactCaseHistory(currentCaseId, normalizedIdentifiers) {
     .filter(({ plural }) => identifiers[plural].length)
     .map(({ plural, entityField }) => ({ [entityField]: { $in: identifiers[plural] } }));
   const legacyEntities = conditions.length ? await Entity.find({
-    associatedCases: { $nin: [currentCaseId] }, $or: conditions,
+    $or: conditions,
   }, {
     associatedCases: 1, normalizedPhones: 1, normalizedVehicles: 1,
     normalizedEmails: 1, normalizedAccounts: 1, normalizedAddresses: 1,
@@ -110,6 +115,24 @@ function exactReportExcerpt(textReports, type, values) {
   return excerpts.join(" ").slice(0, MAX_EXCERPT_CHARS);
 }
 
+function exactReportExcerptForMatches(textReports, matches) {
+  const excerpts = [];
+  for (const report of Array.isArray(textReports) ? textReports : []) {
+    if (typeof report !== "string") continue;
+    for (const sentence of report.split(/(?<=[.!?])\s+|\r?\n/)) {
+      const trimmed = sentence.trim();
+      if (!trimmed) continue;
+      const containsMatch = [...matches.entries()].some(([type, values]) =>
+        values.some((value) => sentenceContainsIdentifier(trimmed, type, value))
+      );
+      if (containsMatch && !excerpts.includes(trimmed)) excerpts.push(trimmed);
+      if (excerpts.length === 3) break;
+    }
+    if (excerpts.length === 3) break;
+  }
+  return excerpts.join(" ").slice(0, MAX_EXCERPT_CHARS);
+}
+
 function evidenceExcerpt(evidence) {
   const parts = [];
   for (const item of Array.isArray(evidence) ? evidence : []) {
@@ -123,10 +146,14 @@ function evidenceExcerpt(evidence) {
   return parts.join("; ");
 }
 
-async function buildEvidencePacket(caseDoc, type, values) {
-  const config = IDENTIFIER_TYPES.find((entry) => entry.type === type);
+async function buildEvidencePacket(caseDoc, matches) {
+  const entityConditions = [...matches.entries()].map(([type, values]) => {
+    const config = IDENTIFIER_TYPES.find((entry) => entry.type === type);
+    return { [config.entityField]: { $in: values } };
+  });
   const entities = await Entity.find({
-    associatedCases: caseDoc.caseId, [config.entityField]: { $in: values },
+    associatedCases: caseDoc.caseId,
+    $or: entityConditions,
   }, { canonicalId: 1, type: 1, aliases: 1 }).limit(12).lean();
   const entityIds = uniqueStrings((entities || []).map((entity) => entity.canonicalId));
   const edges = entityIds.length ? await Edge.find({
@@ -146,31 +173,48 @@ async function buildEvidencePacket(caseDoc, type, values) {
     const detail = [edge.relationReason, event, typeof edge.confidence === "number" ? `confidence ${edge.confidence}` : "", evidenceExcerpt(edge.evidence)].filter(Boolean).join("; ");
     facts.push(`${edge.source} ${edge.edgeType} ${edge.target}${detail ? ` — ${detail}` : ""}`);
   }
-  const base = typeof caseDoc.retrievalSummary === "string" && caseDoc.retrievalSummary.trim()
-    ? caseDoc.retrievalSummary.trim()
-    : [caseDoc.title, caseDoc.metadata?.category].filter(Boolean).join(" — ");
+  const matchedFields = [...matches.entries()].flatMap(([type, values]) =>
+    values.map((value) => `${type}:${value}`)
+  );
   return {
     caseId: caseDoc.caseId,
-    caseSummary: [base, ...facts].filter(Boolean).join("\n").slice(0, MAX_SUMMARY_CHARS),
-    reportExcerpt: exactReportExcerpt(caseDoc.textReports, type, values),
+    caseSummary: [`Exact identifier matches: ${matchedFields.join(", ")}`, ...facts]
+      .filter(Boolean).join("\n").slice(0, MAX_SUMMARY_CHARS),
+    reportExcerpt: exactReportExcerptForMatches(caseDoc.textReports, matches),
     matchType: "exact",
-    matchedFields: values.map((value) => `${type}:${value}`),
+    matchedFields,
   };
 }
 
-async function buildRetrievalContext(currentCaseId, normalizedIdentifiers) {
-  const identifiers = normalizeIdentifierInput(normalizedIdentifiers);
-  const caseQuery = buildCaseExactQuery(currentCaseId, identifiers);
-  if (!caseQuery) return [];
-  const historicalCases = await Case.find(caseQuery, {
-    caseId: 1, retrievalSummary: 1, textReports: 1, normalizedIdentifiers: 1,
-    title: 1, metadata: 1, updatedAt: 1,
+async function buildRetrievalContext(currentCaseId, normalizedIdentifiers, knownCaseHistory = null) {
+  const caseHistory = Array.isArray(knownCaseHistory)
+    ? knownCaseHistory
+    : await buildExactCaseHistory(currentCaseId, normalizedIdentifiers);
+  const historicalCaseIds = uniqueStrings(caseHistory
+    .map((entry) => entry?.lastSeenCaseId)
+    .filter((caseId) => caseId && caseId !== currentCaseId));
+  if (!historicalCaseIds.length) return [];
+
+  const historicalCases = await Case.find({
+    caseId: { $in: historicalCaseIds, $ne: currentCaseId },
+  }, {
+    caseId: 1, textReports: 1, updatedAt: 1,
   }).sort({ updatedAt: -1 }).limit(MAX_HISTORICAL_CASES).lean();
   const packets = [];
   for (const caseDoc of historicalCases || []) {
-    for (const [type, values] of matchedByType(caseDoc, identifiers)) {
-      packets.push(await buildEvidencePacket(caseDoc, type, values));
+    const matches = new Map();
+    for (const entry of caseHistory) {
+      if (entry?.lastSeenCaseId !== caseDoc.caseId || typeof entry.canonicalId !== "string") continue;
+      const separator = entry.canonicalId.indexOf(":");
+      if (separator <= 0) continue;
+      const type = entry.canonicalId.slice(0, separator);
+      const value = entry.canonicalId.slice(separator + 1);
+      if (!IDENTIFIER_TYPES.some((config) => config.type === type) || !value) continue;
+      if (!matches.has(type)) matches.set(type, []);
+      matches.get(type).push(value);
     }
+    for (const [type, values] of matches) matches.set(type, uniqueStrings(values));
+    if (matches.size) packets.push(await buildEvidencePacket(caseDoc, matches));
   }
   return packets;
 }

@@ -3,9 +3,46 @@
 const { callFastAPI, FastApiError } = require("./fastApiClient");
 const { persistCaseResults, PersistenceError } = require("./resultPersistenceService");
 const { Case } = require("../models");
-const { runCrossCaseLinking } = require("./crossCaseLinkingService");
 const { extractIdentifiersFromCase } = require("./identifierNormalizationService");
 const { buildExactCaseHistory, buildRetrievalContext } = require("./historicalContextService");
+
+function enrichRecurrencePatterns(fastApiResult, caseHistory) {
+  if (!fastApiResult || !Array.isArray(fastApiResult.patterns)) return fastApiResult;
+
+  const grouped = new Map();
+  for (const entry of Array.isArray(caseHistory) ? caseHistory : []) {
+    if (!entry?.canonicalId || !entry?.lastSeenCaseId) continue;
+    const key = `${entry.type}:${entry.canonicalId}`;
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        canonicalId: entry.canonicalId,
+        type: entry.type,
+        historicalCaseIds: [],
+      });
+    }
+    const match = grouped.get(key);
+    if (!match.historicalCaseIds.includes(entry.lastSeenCaseId)) {
+      match.historicalCaseIds.push(entry.lastSeenCaseId);
+    }
+  }
+  const exactMatches = [...grouped.values()];
+
+  return {
+    ...fastApiResult,
+    patterns: fastApiResult.patterns.map((pattern) => {
+      if (pattern?.patternType !== "cross_case_recurrence") return pattern;
+      const related = new Set(Array.isArray(pattern.relatedEntityIds) ? pattern.relatedEntityIds : []);
+      const relatedMatches = exactMatches.filter((match) => related.has(match.canonicalId));
+      return {
+        ...pattern,
+        metadata: {
+          ...(pattern.metadata && typeof pattern.metadata === "object" ? pattern.metadata : {}),
+          exactMatches: relatedMatches.length ? relatedMatches : exactMatches,
+        },
+      };
+    }),
+  };
+}
 
 /**
  * Case Processing Service (Orchestration Layer)
@@ -14,13 +51,11 @@ const { buildExactCaseHistory, buildRetrievalContext } = require("./historicalCo
  * FastAPI reasoning call → MongoDB persistence.
  *
  * Pipeline:
- *  1. Create/upsert Case document with status "processing"
- *  2. Extract normalized identifiers from current FIR + CSV
- *  3. Build caseHistory from EXACT identifier matches in previous cases
- *  4. Build retrievalContext from up to 3 best MongoDB matches
- *  5. Call FastAPI reasoning service with complete enriched payload
- *  6. Persist AI results into MongoDB (entities, edges, patterns, guardrail)
- *  7. Trigger cross-case background linking (fire-and-forget)
+ *  1. Extract normalized identifiers from current FIR + CSV
+ *  2. Build exact historical context before writing the current case
+ *  3. Create/upsert the current Case document with status "processing"
+ *  4. Call FastAPI reasoning service with the enriched payload
+ *  5. Persist the complete AI result into existing MongoDB collections
  *
  * @param {Object} normalizedCase — from caseIntakeService.processCaseIntake()
  * @param {Object} [options]      — transport overrides used in tests
@@ -33,28 +68,7 @@ const processCaseThroughFastApi = async (normalizedCase, options = {}) => {
 
   const caseId = normalizedCase.caseId;
 
-  // ── 1. Create the Case document immediately so the dashboard can show "processing" ──
-  try {
-    const newMetadata = {};
-    if (normalizedCase.category) newMetadata.category = normalizedCase.category;
-
-    await Case.findOneAndUpdate(
-      { caseId },
-      {
-        $setOnInsert: {
-          caseId,
-          status: "processing",
-          title: normalizedCase.title,
-          metadata: newMetadata,
-        },
-      },
-      { upsert: true, new: false }
-    );
-  } catch (err) {
-    console.warn("[caseProcessingService] Could not pre-create Case document:", err.message);
-  }
-
-  // ── 2. Extract normalized identifiers from the current FIR and CSV data ──
+  // ── 1. Extract normalized identifiers from the current FIR and CSV data ──
   //    This is used to build the exact-match caseHistory and retrievalContext.
   let normalizedIdentifiers = { phones: [], vehicles: [], emails: [], accounts: [], addresses: [] };
   try {
@@ -74,29 +88,7 @@ const processCaseThroughFastApi = async (normalizedCase, options = {}) => {
     console.warn("[caseProcessingService] Identifier extraction failed:", err.message);
   }
 
-  // Preserve submitted audit material and searchable identifiers before the
-  // remote call. A FastAPI outage must not erase the intake record.
-  await Case.updateOne(
-    { caseId },
-    {
-      $set: {
-        status: "processing",
-        ...(normalizedCase.title ? { title: normalizedCase.title } : {}),
-        ...(normalizedCase.category ? { "metadata.category": normalizedCase.category } : {}),
-        "normalizedIdentifiers.phones": normalizedIdentifiers.phones,
-        "normalizedIdentifiers.vehicles": normalizedIdentifiers.vehicles,
-        "normalizedIdentifiers.emails": normalizedIdentifiers.emails,
-        "normalizedIdentifiers.accounts": normalizedIdentifiers.accounts,
-        "normalizedIdentifiers.addresses": normalizedIdentifiers.addresses,
-      },
-      $addToSet: {
-        textReports: { $each: normalizedCase.textReports || [] },
-        csvRecords: { $each: normalizedCase.csvRecords || [] },
-      },
-    }
-  );
-
-  // ── 3. Build caseHistory from exact identifier matches ───────────────────
+  // ── 2. Build caseHistory from exact identifier matches ───────────────────
   //    Non-fatal: if lookup fails, proceed with empty history so FastAPI still runs.
   let caseHistory = [];
   try {
@@ -106,21 +98,50 @@ const processCaseThroughFastApi = async (normalizedCase, options = {}) => {
     console.error("[caseProcessingService] buildExactCaseHistory failed — empty history:", err.message);
   }
 
-  // ── 4. Build retrievalContext from up to 3 best historical matches ────────
+  // Build retrievalContext from the same exact hits only. Passing caseHistory
+  // avoids a second, potentially divergent historical search.
   //    Non-fatal: if context building fails, send empty array.
   let retrievalContext = [];
   try {
     retrievalContext = await buildRetrievalContext(
       caseId,
       normalizedIdentifiers,
-      normalizedCase.textReports || []
+      caseHistory
     );
     console.log(`[caseProcessingService] retrievalContext entries: ${retrievalContext.length}`);
   } catch (err) {
     console.error("[caseProcessingService] buildRetrievalContext failed — empty context:", err.message);
   }
 
-  // ── 5. Build enriched payload and call FastAPI ───────────────────────────
+  // ── 3. Only now write the current case. This guarantees it cannot become
+  // part of its own historical lookup, even transiently.
+  try {
+    await Case.findOneAndUpdate(
+      { caseId },
+      {
+        $setOnInsert: { caseId },
+        $set: {
+          status: "processing",
+          ...(normalizedCase.title ? { title: normalizedCase.title } : {}),
+          ...(normalizedCase.category ? { "metadata.category": normalizedCase.category } : {}),
+          "normalizedIdentifiers.phones": normalizedIdentifiers.phones,
+          "normalizedIdentifiers.vehicles": normalizedIdentifiers.vehicles,
+          "normalizedIdentifiers.emails": normalizedIdentifiers.emails,
+          "normalizedIdentifiers.accounts": normalizedIdentifiers.accounts,
+          "normalizedIdentifiers.addresses": normalizedIdentifiers.addresses,
+        },
+        $addToSet: {
+          textReports: { $each: normalizedCase.textReports || [] },
+          csvRecords: { $each: normalizedCase.csvRecords || [] },
+        },
+      },
+      { upsert: true, returnDocument: "before" }
+    );
+  } catch (err) {
+    console.warn("[caseProcessingService] Could not pre-create Case document:", err.message);
+  }
+
+  // ── 4. Build enriched payload and call FastAPI ───────────────────────────
   const enrichedCase = {
     ...normalizedCase,
     caseHistory,
@@ -133,6 +154,7 @@ const processCaseThroughFastApi = async (normalizedCase, options = {}) => {
   let fastApiResult;
   try {
     fastApiResult = await callFastAPI(enrichedCase, options);
+    fastApiResult = enrichRecurrencePatterns(fastApiResult, caseHistory);
   } catch (err) {
     // Mark case as 'failed' — never leave it stuck on 'processing'
     try {
@@ -153,24 +175,21 @@ const processCaseThroughFastApi = async (normalizedCase, options = {}) => {
     throw err;
   }
 
-  // ── 6. Persist AI reasoning results into MongoDB ─────────────────────────
+  // ── 5. Persist AI reasoning results into MongoDB ─────────────────────────
   console.log(`[caseProcessingService] Calling persistCaseResults for ${caseId}...`);
   const persistenceResult = await persistCaseResults(fastApiResult, {
     ...normalizedCase,
     normalizedIdentifiers,
+    caseHistory,
   });
   console.log(`[caseProcessingService] persistCaseResults finished for ${caseId}.`);
-
-  // ── 7. Trigger cross-case background linking (fire-and-forget) ───────────
-  runCrossCaseLinking(caseId).catch((err) => {
-    console.error("[caseProcessingService] Background cross-case linking failed:", err.message);
-  });
 
   return persistenceResult;
 };
 
 module.exports = {
   processCaseThroughFastApi,
+  enrichRecurrencePatterns,
   FastApiError,
   PersistenceError,
 };

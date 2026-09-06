@@ -103,6 +103,15 @@ const normalizedIdentifiersSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const exactCaseHistorySchema = new mongoose.Schema(
+  {
+    canonicalId: { type: String, required: true, trim: true },
+    type: { type: String, required: true, trim: true },
+    lastSeenCaseId: { type: String, required: true, trim: true },
+  },
+  { _id: false }
+);
+
 /**
  * Case Schema
  * Represents a single investigation instance.
@@ -178,6 +187,15 @@ const caseSchema = new mongoose.Schema(
       default: [],
     },
 
+    // Exact-only history sent to FastAPI for this processing run. Logical
+    // case IDs are retained for recurrence alerts and auditability.
+    caseHistory: { type: [exactCaseHistorySchema], default: [] },
+
+    // Immutable-shaped snapshot of the successful FastAPI response. Entities,
+    // edges and patterns continue to be normalized into their existing
+    // collections for graph queries; this preserves the complete wire result.
+    fastApiResponse: { type: mongoose.Schema.Types.Mixed },
+
     // FastAPI system-level guardrail status for the whole case (if returned)
     systemStatus: { type: String, trim: true },
 
@@ -207,9 +225,8 @@ const caseSchema = new mongoose.Schema(
 
 // ----- Indexes -----
 
-// Full-text search over case name, category, and AI-generated summary.
-// The $text operator in historicalContextService uses this index for
-// keyword fallback when no exact identifier match is found.
+// Full-text search remains available for investigator-facing discovery only.
+// It is never used to build deterministic caseHistory.
 caseSchema.index(
   { title: "text", "metadata.category": "text", retrievalSummary: "text" },
   { name: "case_text_search", background: true }

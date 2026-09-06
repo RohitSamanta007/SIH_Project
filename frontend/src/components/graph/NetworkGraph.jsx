@@ -34,11 +34,10 @@ const EDGE_COLORS = {
  *  1. Use reviewStatus if specified (approved/rejected).
  *  2. If reviewStatus is 'flagged', treat as possible_connection.
  *  3. Otherwise, use systemStatus (if present) or fallback to guardrailStatus.
- *  4. Render a cross-case style only for an actual recurrence edge or an
- *     explicit cross-case status. A node appearing in another case must not
- *     relabel its otherwise verified local relationships.
+ * A recurrence pattern is entity-level metadata and never changes edge
+ * rendering. Only an explicit investigator/model edge status can do that.
  */
-export function deriveDisplayConnectionType(edge, crossCaseEdgeIds = new Set()) {
+export function deriveDisplayConnectionType(edge) {
   // 1. Manual review overrides
   const review = edge.reviewStatus;
   if (review && review !== 'unspecified') {
@@ -61,17 +60,11 @@ export function deriveDisplayConnectionType(edge, crossCaseEdgeIds = new Set()) 
   if (rawStatus === 'unknown' || rawStatus === 'unknown_connection') return 'unknown';
   if (rawStatus === 'cross_case' || rawStatus === 'cross_connection') return 'cross_connection';
 
-  // 4. Pattern metadata can identify a recurrence edge, but never promotes
-  // every edge incident to a cross-case entity.
-  const isCrossEdge = crossCaseEdgeIds.has(edge.id || edge.edgeId);
-  if (isCrossEdge) return 'cross_connection';
-  
   return 'unknown';
 }
 
 const NetworkGraph = ({
   graphData,
-  patterns,
   onNodeClick,
   onEdgeClick,
   onBackgroundClick,
@@ -114,19 +107,6 @@ const NetworkGraph = ({
     }
   }, [dimensions]);
 
-  // Pattern metadata may identify the actual recurrence edge. Entity-level
-  // membership is deliberately not used for edge classification.
-  const crossCaseEdgeIds = useMemo(() => {
-    const edgeIds = new Set();
-    const patternList = Array.isArray(patterns) ? patterns : [];
-    for (const p of patternList) {
-      if (p.patternType === 'cross_case_recurrence') {
-        (p.relatedEdgeIds || []).forEach(id => edgeIds.add(id));
-      }
-    }
-    return edgeIds;
-  }, [patterns]);
-
   // Format data and calculate degrees for node sizing.
   // ALL edges are included — no guardrailStatus filtering here.
   // displayConnectionType is derived per edge for visual styling only.
@@ -143,7 +123,7 @@ const NetworkGraph = ({
         target: e.target || e.targetEntityId,
       };
       // Attach display classification — does NOT overwrite guardrailStatus
-      mapped.displayConnectionType = deriveDisplayConnectionType(mapped, crossCaseEdgeIds);
+      mapped.displayConnectionType = deriveDisplayConnectionType(mapped);
       return mapped;
     });
 
@@ -156,7 +136,7 @@ const NetworkGraph = ({
     });
 
     return { nodes, links };
-  }, [graphData, crossCaseEdgeIds]);
+  }, [graphData]);
 
   // Determine whether ANY entity/edge in this dataset is actually tagged with
   // currentCaseId. If nothing matches (e.g. associatedCases is missing/empty

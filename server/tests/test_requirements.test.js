@@ -68,7 +68,10 @@ describe("Backend Requirements Tests", () => {
         }
       ],
       entities: [],
-      edges: []
+      relationships: [],
+      patterns: [{ patternType: "cross_case_recurrence", relatedEntityIds: ["phone:9876543210"] }],
+      guardrail: [],
+      similarCaseLeads: [],
     };
 
     Case.findOne.mockResolvedValue(null);
@@ -77,14 +80,31 @@ describe("Backend Requirements Tests", () => {
       status: "completed", 
       timelineEvents: fastApiResult.timelineEvents 
     }]);
+    Pattern.findOne.mockResolvedValue(null);
+    Pattern.create.mockResolvedValue([fastApiResult.patterns[0]]);
 
-    const result = await persistCaseResults(fastApiResult, { title: "Test Case" });
+    await persistCaseResults(fastApiResult, {
+      title: "Test Case",
+      caseHistory: [{ canonicalId: "phone:9876543210", type: "phone", lastSeenCaseId: "CASE_HIST" }],
+    });
     
     expect(Case.create).toHaveBeenCalled();
     const createArg = Case.create.mock.calls[0][0][0];
     expect(createArg.timelineEvents).toBeDefined();
     expect(createArg.timelineEvents.length).toBe(1);
     expect(createArg.timelineEvents[0].eventDate).toBe("2024-03-15");
+    expect(createArg.caseHistory[0].lastSeenCaseId).toBe("CASE_HIST");
+    expect(createArg.fastApiResponse).toEqual(expect.objectContaining({
+      caseId,
+      retrievalSummary: "Test summary",
+      entities: [],
+      relationships: [],
+      patterns: fastApiResult.patterns,
+      guardrail: [],
+      timelineEvents: fastApiResult.timelineEvents,
+      similarCaseLeads: [],
+      receivedAt: expect.any(Date),
+    }));
   });
 
   it("Requirement 3: buildExactCaseHistory uses exact normalized identifier equality", async () => {
@@ -122,7 +142,7 @@ describe("Backend Requirements Tests", () => {
     expect(findArg.$or[0]["normalizedIdentifiers.phones"]).toBeDefined();
   });
 
-  it("Requirement 3: buildRetrievalContext extracts retrievalSummary and bounded excerpts", async () => {
+  it("Requirement 3: buildRetrievalContext uses only known exact historical hits", async () => {
     const historicalCaseId = "CASE_HIST";
     
     const mockCases = [{
@@ -154,14 +174,18 @@ describe("Backend Requirements Tests", () => {
       accounts: []
     };
 
-    const context = await buildRetrievalContext(newCaseId, currentIdentifiers, ["Some new text"]);
+    const context = await buildRetrievalContext(newCaseId, currentIdentifiers, [{
+      canonicalId: "phone:9876543210",
+      type: "phone",
+      lastSeenCaseId: historicalCaseId,
+    }]);
     
     expect(context.length).toBe(1);
     expect(context[0].caseId).toBe(historicalCaseId);
-    expect(context[0].caseSummary).toBe("Historical theft summary");
+    expect(context[0].caseSummary).toBe("Exact identifier matches: phone:9876543210");
     expect(context[0].matchType).toBe("exact");
     
     const findArg = Case.find.mock.calls[0][0];
-    expect(findArg.caseId.$ne).toBe(newCaseId);
+    expect(findArg.caseId).toEqual({ $in: [historicalCaseId], $ne: newCaseId });
   });
 });

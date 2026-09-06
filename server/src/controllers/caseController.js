@@ -406,12 +406,88 @@ const createManualRelationship = async (req, res, next) => {
     }
 
     const edgeType = rawEdgeType.toLowerCase().replace(/\s+/g, '_');
-    const duplicate = await Edge.findOne({ source, target, edgeType });
+    const duplicate = await Edge.findOne({
+      edgeType,
+      $or: [
+        { source, target },
+        { source: target, target: source },
+      ],
+    });
+    const now = new Date();
+
     if (duplicate) {
-      return res.status(409).json({ success: false, error: { code: 'RELATIONSHIP_EXISTS', message: 'This relationship already exists; open it to update its status or note' } });
+      if ((duplicate.associatedCases || []).includes(normalizedCaseId)) {
+        return res.status(409).json({ success: false, error: { code: 'RELATIONSHIP_EXISTS', message: 'This relationship already exists; open it to update its status or note' } });
+      }
+
+      const previousStatus = duplicate.reviewStatus || duplicate.systemStatus || duplicate.guardrailStatus || 'unknown';
+      duplicate.associatedCases = Array.from(new Set([...(duplicate.associatedCases || []), normalizedCaseId]));
+      duplicate.reviewStatus = status;
+      duplicate.reviewReason = reason;
+      duplicate.reviewUpdatedBy = investigatorId;
+      duplicate.reviewUpdatedAt = now;
+      duplicate.reviewAudit = Array.isArray(duplicate.reviewAudit) ? duplicate.reviewAudit : [];
+      duplicate.reviewAudit.push({
+        reviewedBy: investigatorId,
+        reviewedAt: now,
+        previousStatus,
+        newStatus: status,
+        note: reason,
+      });
+      duplicate.evidence = Array.isArray(duplicate.evidence) ? duplicate.evidence : [];
+      duplicate.evidence.push({
+        sourceReportId: 'investigator_manual',
+        matchedField: 'manual_relationship',
+        record: { summary: reason },
+        metadata: {
+          createdBy: investigatorId,
+          createdAt: now,
+          caseId: normalizedCaseId,
+          ...(eventDate ? { eventDate } : {}),
+          ...(eventTime ? { eventTime } : {}),
+        },
+      });
+      if (!duplicate.eventDate && eventDate) duplicate.eventDate = eventDate;
+      if (!duplicate.eventTime && eventTime) duplicate.eventTime = eventTime;
+      if (!duplicate.eventType) duplicate.eventType = edgeType;
+      if (!duplicate.relationReason) duplicate.relationReason = reason;
+      if (eventDate && (!duplicate.dateConfidence || duplicate.dateConfidence === 'none')) {
+        duplicate.dateConfidence = 'explicit';
+      }
+      duplicate.attributes = { ...(duplicate.attributes || {}), manuallyCorroborated: true };
+      await duplicate.save();
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          id: duplicate.edgeId || duplicate._id.toString(),
+          edgeId: duplicate.edgeId || duplicate._id.toString(),
+          source: duplicate.source,
+          target: duplicate.target,
+          edgeType: duplicate.edgeType,
+          confidence: duplicate.confidence,
+          eventDate: duplicate.eventDate || null,
+          eventTime: duplicate.eventTime || null,
+          eventType: duplicate.eventType || null,
+          relationReason: duplicate.relationReason || null,
+          dateConfidence: duplicate.dateConfidence || 'none',
+          originalStatus: duplicate.systemStatus || duplicate.guardrailStatus || 'unknown',
+          systemStatus: duplicate.systemStatus || duplicate.guardrailStatus || null,
+          reviewStatus: duplicate.reviewStatus,
+          effectiveStatus: duplicate.reviewStatus,
+          latestNote: duplicate.reviewReason,
+          reviewUpdatedBy: duplicate.reviewUpdatedBy,
+          reviewUpdatedAt: duplicate.reviewUpdatedAt,
+          reviewAudit: duplicate.reviewAudit,
+          evidence: duplicate.evidence,
+          attributes: duplicate.attributes,
+          associatedCases: duplicate.associatedCases,
+          reusedExisting: true,
+        },
+        error: null,
+      });
     }
 
-    const now = new Date();
     const edgeId = `manual-${randomUUID()}`;
     const edge = await Edge.create({
       associatedCases: [normalizedCaseId],

@@ -91,6 +91,98 @@ describe("investigator decisions", () => {
     expect(res.status).toHaveBeenCalledWith(201);
   });
 
+  test("links a global relationship into the current case and appends investigator evidence", async () => {
+    Case.exists.mockResolvedValue({ _id: "case-db-id" });
+    Edge.find.mockReturnValue({
+      select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue([]) }),
+    });
+    Entity.find.mockReturnValue({
+      select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue([
+        { canonicalId: "person:rafiq" }, { canonicalId: "vehicle:wb24" },
+      ]) }),
+    });
+    const existing = {
+      _id: { toString: () => "edge-db-id" },
+      edgeId: "existing-edge",
+      source: "person:rafiq",
+      target: "vehicle:wb24",
+      edgeType: "associated_with",
+      associatedCases: ["CASE-OLD"],
+      confidence: 0.9,
+      systemStatus: "possible_connection",
+      reviewStatus: "possible_connection",
+      reviewAudit: [],
+      evidence: [{ sourceReportId: "CASE-OLD_text_0", matchedField: "associated_with", record: {} }],
+      attributes: {},
+      dateConfidence: "none",
+      save: jest.fn(),
+    };
+    Edge.findOne.mockResolvedValue(existing);
+
+    const res = response();
+    await controller.createManualRelationship({
+      params: { caseId: "CASE-NEW" },
+      body: {
+        source: "person:rafiq", target: "vehicle:wb24", edgeType: "Associated with",
+        status: "verified", reason: "The FIR explicitly links the person and vehicle",
+        eventDate: "2026-03-05", eventTime: "15:04",
+      },
+      user: { role: "investigator", username: "asha" },
+    }, res, jest.fn());
+
+    expect(Edge.findOne).toHaveBeenCalledWith({
+      edgeType: "associated_with",
+      $or: [
+        { source: "person:rafiq", target: "vehicle:wb24" },
+        { source: "vehicle:wb24", target: "person:rafiq" },
+      ],
+    });
+    expect(existing.associatedCases).toEqual(["CASE-OLD", "CASE-NEW"]);
+    expect(existing.reviewStatus).toBe("verified");
+    expect(existing.reviewAudit).toEqual([expect.objectContaining({
+      reviewedBy: "asha", previousStatus: "possible_connection", newStatus: "verified",
+    })]);
+    expect(existing.evidence).toHaveLength(2);
+    expect(existing.evidence[1]).toMatchObject({
+      sourceReportId: "investigator_manual",
+      metadata: { caseId: "CASE-NEW", eventDate: "2026-03-05", eventTime: "15:04" },
+    });
+    expect(existing.attributes.manuallyCorroborated).toBe(true);
+    expect(existing.save).toHaveBeenCalled();
+    expect(Edge.create).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      success: true,
+      data: expect.objectContaining({ reusedExisting: true, associatedCases: ["CASE-OLD", "CASE-NEW"] }),
+    }));
+  });
+
+  test("still rejects a relationship that is already linked to the current case", async () => {
+    Case.exists.mockResolvedValue({ _id: "case-db-id" });
+    Edge.find.mockReturnValue({
+      select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue([]) }),
+    });
+    Entity.find.mockReturnValue({
+      select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue([
+        { canonicalId: "person:a" }, { canonicalId: "vehicle:b" },
+      ]) }),
+    });
+    Edge.findOne.mockResolvedValue({
+      source: "person:a", target: "vehicle:b", edgeType: "associated_with",
+      associatedCases: ["CASE-1"],
+    });
+
+    const res = response();
+    await controller.createManualRelationship({
+      params: { caseId: "CASE-1" },
+      body: { source: "person:a", target: "vehicle:b", edgeType: "associated_with", status: "verified", reason: "Already known" },
+      user: { role: "investigator", username: "asha" },
+    }, res, jest.fn());
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(Edge.create).not.toHaveBeenCalled();
+  });
+
   test("refuses to connect an entity outside the current case graph", async () => {
     Case.exists.mockResolvedValue({ _id: "case-db-id" });
     Edge.find.mockReturnValue({

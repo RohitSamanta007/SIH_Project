@@ -25,4 +25,18 @@ describe("deterministic identifier normalization", () => {
     });
     expect(Object.values(identifiers).flat()).not.toContain("suspect");
   });
+
+  test("extracts acceptance-case phones, vehicles, and structured street addresses", () => {
+    const identifiers = extractIdentifiersFromCase([
+      "On 17 March 2026, call records linked phone 9050011122 to motorcycle WB-19-R-8842. " +
+      "Officers searched workshop 44 Ganges Road, Howrah.",
+    ], []);
+    expect(identifiers).toEqual({
+      phones: ["9050011122"],
+      vehicles: ["WB19R8842"],
+      emails: [],
+      accounts: [],
+      addresses: ["44 ganges road howrah"],
+    });
+  });
 });

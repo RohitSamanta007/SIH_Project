@@ -34,6 +34,45 @@ const mapEdge = (edge) => ({
   createdAt: edge.createdAt,
 });
 
+const decorateRecurrencePatterns = async (patterns, currentCaseId) => {
+  const rows = Array.isArray(patterns) ? patterns : [];
+  const referencedIds = [...new Set(rows.flatMap((pattern) => {
+    if (pattern?.patternType !== "cross_case_recurrence") return [];
+    const matches = Array.isArray(pattern.metadata?.exactMatches) ? pattern.metadata.exactMatches : [];
+    return matches.flatMap((match) => Array.isArray(match?.historicalCaseIds) ? match.historicalCaseIds : []);
+  }).filter((caseId) => typeof caseId === "string" && caseId && caseId !== currentCaseId))];
+
+  const availableIds = new Set();
+  if (referencedIds.length) {
+    const availableCases = await Case.find(
+      { caseId: { $in: referencedIds } },
+      { caseId: 1 }
+    ).lean();
+    for (const caseDoc of availableCases || []) {
+      if (caseDoc?.caseId) availableIds.add(caseDoc.caseId);
+    }
+  }
+
+  return rows.map((pattern) => {
+    if (pattern?.patternType !== "cross_case_recurrence") return pattern;
+    const exactMatches = Array.isArray(pattern.metadata?.exactMatches)
+      ? pattern.metadata.exactMatches
+      : [];
+    return {
+      ...pattern,
+      metadata: {
+        ...(pattern.metadata || {}),
+        exactMatches: exactMatches.map((match) => ({
+          ...match,
+          historicalCases: (Array.isArray(match?.historicalCaseIds) ? match.historicalCaseIds : [])
+            .filter((caseId) => caseId && caseId !== currentCaseId)
+            .map((caseId) => ({ caseId, available: availableIds.has(caseId) })),
+        })),
+      },
+    };
+  });
+};
+
 /**
  * Retrieve the full graph (nodes + edges) for a given case
  *
@@ -62,6 +101,7 @@ const getCaseGraph = async (caseId) => {
     $or: [{ associatedCases: normalizedCaseId }, { canonicalId: { $in: endpointIds } }],
   }).lean();
   const patterns = await Pattern.find({ caseId: normalizedCaseId }).lean();
+  const decoratedPatterns = await decorateRecurrencePatterns(patterns, normalizedCaseId);
 
   const nodes = entities.map((entity) => ({
     canonicalId: entity.canonicalId,
@@ -85,7 +125,7 @@ const getCaseGraph = async (caseId) => {
     similarCaseLeads: caseDoc.similarCaseLeads || [],
     nodes,
     edges: mappedEdges,
-    patterns,
+    patterns: decoratedPatterns,
   };
 };
 
@@ -350,4 +390,5 @@ module.exports = {
   getCaseTimeline,
   getGuardrailDetail,
   getCasesList,
+  decorateRecurrencePatterns,
 };

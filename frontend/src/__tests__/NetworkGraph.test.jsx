@@ -59,10 +59,10 @@ describe('NetworkGraph Component', () => {
     )).toBe('verified');
   });
 
-  it('uses cross-case styling only for the explicitly identified recurrence edge', () => {
+  it('does not create cross-connection styling from recurrence pattern metadata alone', () => {
     expect(deriveDisplayConnectionType(
       { id: 'recurrence-edge', source: 'person:rafiq', target: 'phone:9050011122' },
       new Set(['recurrence-edge'])
-    )).toBe('cross_connection');
+    )).toBe('unknown');
   });
 });

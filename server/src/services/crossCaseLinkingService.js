@@ -1,6 +1,6 @@
 "use strict";
 
-const { Entity, Edge } = require("../models");
+const { Entity } = require("../models");
 
 /**
  * Cross-Case Entity Linking Service
@@ -9,8 +9,8 @@ const { Entity, Edge } = require("../models");
  * For every entity in the newly completed case, it queries MongoDB for entities
  * from OTHER cases that share EXACT NORMALIZED IDENTIFIERS.
  *
- * It creates a bounded recurrence edge only. It does not import unrelated
- * neighbours or merge case membership onto historical nodes.
+ * This legacy scan is read-only. Exact recurrence is represented by the
+ * FastAPI pattern persisted for the case, never by an automatic graph edge.
  */
 
 /**
@@ -79,53 +79,8 @@ const runCrossCaseLinking = async (caseId) => {
         if (distinctHistoricalCases.length === 0) continue;
         linked++;
 
-        // Current + one distinct historical case satisfies the two-case threshold.
-        const [src, tgt] = [newEntity.canonicalId, matchedEntity.canonicalId].sort();
-        const overlaps = [];
-        for (const [label, field] of [["phone", "normalizedPhones"], ["vehicle", "normalizedVehicles"], ["email", "normalizedEmails"], ["account", "normalizedAccounts"], ["address", "normalizedAddresses"]]) {
-          const oldValues = new Set(matchedEntity[field] || []);
-          for (const value of newEntity[field] || []) if (oldValues.has(value)) overlaps.push(`${label}:${value}`);
-        }
-        const bridgeEdge = await Edge.findOneAndUpdate(
-          {
-            source: src,
-            target: tgt,
-            edgeType: "cross_case_recurrence",
-          },
-          {
-            $addToSet: { associatedCases: { $each: [caseId, ...distinctHistoricalCases] } },
-            $setOnInsert: {
-              edgeId: `cross-case:${src}:${tgt}`,
-              source: src,
-              target: tgt,
-              edgeType: "cross_case_recurrence",
-              systemStatus: "cross_connection",
-              guardrailStatus: "cross_connection",
-              guardrailRationale: `Deterministic exact identifier recurrence across ${[caseId, ...distinctHistoricalCases].join(", ")}`,
-              relationReason: "Deterministic exact identifier match",
-              confidence: 1.0,
-              evidence: [
-                {
-                  sourceReportId: "system_generated",
-                  matchedField: "exact_identifier_overlap",
-                  record: {
-                    newCase: caseId,
-                    matchedCases: distinctHistoricalCases,
-                    newEntityId: newEntity.canonicalId,
-                    matchedEntityId: matchedEntity.canonicalId,
-                    matchedFields: overlaps,
-                  },
-                },
-              ],
-            },
-          },
-          { upsert: true, new: true }
-        );
-
-        if (bridgeEdge) edgesCreated++;
-
         console.log(
-          `${tag} Linked "${newEntity.canonicalId}" ↔ "${matchedEntity.canonicalId}" from ${distinctHistoricalCases.join(", ")}`
+          `${tag} Exact recurrence found for "${newEntity.canonicalId}" in ${distinctHistoricalCases.join(", ")}; no graph edge created.`
         );
       }
     }

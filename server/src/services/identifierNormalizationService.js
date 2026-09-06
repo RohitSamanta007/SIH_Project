@@ -147,16 +147,19 @@ const VEHICLE_RE =
 const EMAIL_RE =
   /\b([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b/g;
 
-// Account numbers — sequences of 9–18 digits (heuristic; may over-match)
-const ACCOUNT_RE =
-  /\b(\d{9,18})\b/g;
 const ACCOUNT_LABEL_RE =
-  /\b(?:account|a\/?c|acct|upi)\s*(?:number|no|id)?\s*[:\-]?\s*([a-z0-9][a-z0-9\s._\-/]{3,40})/gi;
+  /\b(?:account|a\/?c|acct|upi)\s*(?:number|no|id)?\s*[:\-]?\s*([a-z0-9][a-z0-9._\-/]{3,39})/gi;
 
 // Conservative labelled address extraction. Unlabelled FIR vocabulary never
 // becomes an automatic identifier.
 const ADDRESS_RE =
   /\b(?:address|residing at|resident of|located at)\s*[:\-]?\s*([^.;\r\n]{5,160})/gi;
+
+// Structured street addresses are identifier-shaped even when the FIR does
+// not prefix them with "address" or "located at". Requiring a house number
+// and a street-kind word avoids promoting generic place prose into history.
+const STREET_ADDRESS_RE =
+  /\b(\d{1,6}[a-z0-9\/-]*\s+(?:[a-z0-9.'-]+\s+){0,5}(?:road|street|lane|avenue|highway|nagar|colony|boulevard|drive|way)(?:\s*,\s*[a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,2})?)(?=[.;\r\n]|$)/gi;
 
 /**
  * Extract and normalize identifiers from a single text string.
@@ -198,20 +201,18 @@ function extractIdentifiersFromText(text) {
     if (v) vehicles.add(v);
   }
 
-  // Account numbers (only if they weren't already matched as a phone)
-  for (const m of text.matchAll(ACCOUNT_RE)) {
-    const raw = m[1];
-    // Skip 10-digit sequences that were already captured as phones
-    if (raw.length === 10 && phones.has(normalizePhone(raw))) continue;
-    const a = normalizeAccount(raw);
-    if (a) accounts.add(a);
-  }
+  // Account identifiers require an explicit account/UPI label in FIR text.
+  // Unlabelled long digit sequences may be phones or unrelated identifiers.
   for (const m of text.matchAll(ACCOUNT_LABEL_RE)) {
     const account = normalizeAccount(m[1]);
     if (account) accounts.add(account);
   }
 
   for (const m of text.matchAll(ADDRESS_RE)) {
+    const address = normalizeAddress(m[1]);
+    if (address) addresses.add(address);
+  }
+  for (const m of text.matchAll(STREET_ADDRESS_RE)) {
     const address = normalizeAddress(m[1]);
     if (address) addresses.add(address);
   }
@@ -275,7 +276,7 @@ function extractIdentifiersFromCsvRecords(records) {
         if (e) emails.add(e);
         continue;
       }
-      if (/account|acc_no|acno|ifsc|upi/.test(colKey)) {
+      if (/account|acc_no|acno|upi/.test(colKey)) {
         const a = normalizeAccount(val);
         if (a) accounts.add(a);
         continue;
@@ -402,7 +403,6 @@ function buildEntityNormalizedIdentifiers(entity) {
     ["account_no",     accounts,  normalizeAccount],
     ["acc_no",         accounts,  normalizeAccount],
     ["upi_id",         accounts,  normalizeAccount],
-    ["ifsc",           accounts,  normalizeAccount],
     // addresses
     ["address",        addresses, normalizeAddress],
     ["location",       addresses, normalizeAddress],

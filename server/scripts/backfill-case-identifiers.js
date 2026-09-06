@@ -45,7 +45,11 @@ async function run() {
     },
     { $unset: { reviewStatus: "" } }
   );
+  // Create declared indexes without dropping existing indexes or case data.
+  await Case.createIndexes();
+  await Entity.createIndexes();
   console.log(`Backfilled normalized identifiers for ${perCase.size} logical cases.`);
+  console.log("Verified logical caseId and normalized identifier indexes.");
   console.log(`Cleared ${clearedLegacyDefaults.modifiedCount || 0} legacy model-derived review statuses.`);
 }
 

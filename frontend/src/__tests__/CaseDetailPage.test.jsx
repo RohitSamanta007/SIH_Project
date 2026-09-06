@@ -9,6 +9,7 @@ import {
   TimelineScrubber, 
   EdgeReviewDropdown,
   ManualRelationshipForm,
+  CrossCaseRecurrenceAlert,
 } from '../pages/CaseDetailPage';
 
 afterEach(() => {
@@ -25,6 +26,52 @@ vi.mock('../api/apiClient', () => ({
 }));
 
 describe('CaseDetailPage Components', () => {
+  it('renders exact recurrence identifiers and navigates with the real logical caseId', () => {
+    const navigate = vi.fn();
+    render(<CrossCaseRecurrenceAlert
+      currentCaseId="ALPHA-NEW"
+      navigate={navigate}
+      nodes={[{ canonicalId: 'phone:9050011122', aliases: ['9050011122'] }]}
+      patterns={[{
+        patternType: 'cross_case_recurrence',
+        metadata: {
+          exactMatches: [{
+            canonicalId: 'phone:9050011122', type: 'phone',
+            historicalCases: [{ caseId: 'ALPHA-01', available: true }],
+          }],
+        },
+      }]}
+    />);
+
+    expect(screen.getByRole('alert', { name: 'Cross-case recurrence' })).toBeDefined();
+    expect(screen.getByText('phone:9050011122')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Open case ALPHA-01' }));
+    expect(navigate).toHaveBeenCalledWith('/cases/ALPHA-01');
+    expect(navigate).not.toHaveBeenCalledWith(expect.stringContaining('undefined'));
+  });
+
+  it('handles an unavailable historical recurrence reference without navigation', () => {
+    const navigate = vi.fn();
+    render(<CrossCaseRecurrenceAlert
+      currentCaseId="ALPHA-NEW"
+      navigate={navigate}
+      nodes={[]}
+      patterns={[{
+        patternType: 'cross_case_recurrence',
+        metadata: {
+          exactMatches: [{
+            canonicalId: 'vehicle:WB19R8842', type: 'vehicle',
+            historicalCases: [{ caseId: 'ALPHA-03', available: false }],
+          }],
+        },
+      }]}
+    />);
+
+    expect(screen.getByText('ALPHA-03: Referenced case unavailable')).toBeDefined();
+    expect(screen.queryByRole('button', { name: /ALPHA-03/ })).toBeNull();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
   it('navigates using matchedCaseId and never an undefined fallback', async () => {
     const leads = [
       { matchedCaseId: 'CASE-123', status: 'similar_case_lead', similarityScore: 0.85, rationale: 'Similar patterns' }
@@ -144,6 +191,21 @@ describe('CaseDetailPage Components', () => {
       fireEvent(slider, new MouseEvent('pointermove', { bubbles: true, clientX: 100 }));
       fireEvent(slider, new MouseEvent('pointerup', { bubbles: true, clientX: 100 }));
       expect(onChangeMock).toHaveBeenCalledWith({ start: new Date(1000).toISOString(), end: new Date(5000).toISOString() });
+    });
+
+    it('TimelineScrubber gives uneven dates evenly spaced slider stops', () => {
+      const bounds = { min: 1000, max: 10000, timestamps: [1000, 2000, 3000, 10000] };
+      const onChangeMock = vi.fn();
+      render(<TimelineScrubber bounds={bounds} activeRange={null} onChange={onChangeMock} />);
+      const slider = screen.getByRole('slider');
+      slider.getBoundingClientRect = () => ({ left: 0, width: 90, right: 90, top: 0, bottom: 20, height: 20 });
+
+      fireEvent.click(slider, { clientX: 60 });
+
+      expect(onChangeMock).toHaveBeenCalledWith({
+        start: new Date(1000).toISOString(),
+        end: new Date(3000).toISOString(),
+      });
     });
 
     it('reports no dated events without hiding undated evidence data', () => {

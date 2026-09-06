@@ -144,6 +144,17 @@ class MockFastApiServer {
                 rationale: "Evidence directly verified by CDR records",
               },
             ],
+            timelineEvents: [
+              {
+                edgeId: "EDGE-001",
+                eventDate: "2026-08-15",
+                eventTime: "12:00:00",
+                eventType: "financial_transfer",
+                relationReason: "Fund transfer from suspect account",
+                evidenceIds: ["ev-1"],
+                dateConfidence: "explicit",
+              },
+            ],
           };
 
           res.writeHead(200, { "Content-Type": "application/json" });

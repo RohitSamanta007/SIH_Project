@@ -179,6 +179,14 @@ const persistCaseResults = async (fastApiResult, intakeMetadata = {}) => {
   validateFastApiResult(fastApiResult, expectedCaseId);
 
   const caseId = fastApiResult.caseId.trim();
+  const fastApiResponseSnapshot = {
+    ...fastApiResult,
+    caseId,
+    receivedAt: new Date(),
+  };
+  const exactCaseHistory = Array.isArray(intakeMetadata.caseHistory)
+    ? intakeMetadata.caseHistory
+    : [];
 
   // Build per-edge guardrail lookup (edgeId → GuardrailItem)
   const guardrailMap = new Map(
@@ -246,6 +254,8 @@ const persistCaseResults = async (fastApiResult, intakeMetadata = {}) => {
             timelineEvents: Array.isArray(fastApiResult.timelineEvents)
               ? fastApiResult.timelineEvents
               : [],
+            caseHistory:      exactCaseHistory,
+            fastApiResponse:  fastApiResponseSnapshot,
             systemStatus:     fastApiResult.systemStatus || undefined,
             sourceUploads:    [newUploadRecord],
             metadata:         newMetadata,
@@ -286,6 +296,9 @@ const persistCaseResults = async (fastApiResult, intakeMetadata = {}) => {
       if (Array.isArray(fastApiResult.timelineEvents)) {
         caseDoc.timelineEvents = fastApiResult.timelineEvents;
       }
+      caseDoc.caseHistory = exactCaseHistory;
+      caseDoc.fastApiResponse = fastApiResponseSnapshot;
+      caseDoc.markModified("fastApiResponse");
       if (fastApiResult.priority) {
         if (!caseDoc.metadata) caseDoc.metadata = {};
         caseDoc.metadata.priority = fastApiResult.priority;

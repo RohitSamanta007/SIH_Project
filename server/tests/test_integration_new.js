@@ -31,6 +31,10 @@ describe("Integration Tests - FastAPI enhancements", () => {
   });
 
   afterAll(async () => {
+    await Case.deleteMany({ caseId: { $regex: "^CASE-TEST-NEW-" } });
+    await Entity.deleteMany({ associatedCases: { $regex: "^CASE-TEST-NEW-" } });
+    await Edge.deleteMany({ associatedCases: { $regex: "^CASE-TEST-NEW-" } });
+    await Pattern.deleteMany({ caseId: { $regex: "^CASE-TEST-NEW-" } });
     await mockServer.stop();
     await mongoose.connection.close();
     serverInstance.close();
@@ -69,6 +73,15 @@ describe("Integration Tests - FastAPI enhancements", () => {
     expect(caseDoc.similarCaseLeads.length).toBe(1);
     expect(caseDoc.similarCaseLeads[0].status).toBe("possible_connection");
     expect(caseDoc.normalizedIdentifiers.phones).toContain("9876543210");
+    expect(caseDoc.fastApiResponse.caseId).toBe("CASE-TEST-NEW-01");
+    expect(caseDoc.fastApiResponse.entities).toHaveLength(2);
+    expect(caseDoc.fastApiResponse.relationships).toHaveLength(1);
+    expect(caseDoc.fastApiResponse.patterns).toHaveLength(1);
+    expect(caseDoc.fastApiResponse.guardrail).toHaveLength(1);
+    expect(caseDoc.fastApiResponse.timelineEvents).toHaveLength(1);
+    expect(caseDoc.fastApiResponse.similarCaseLeads).toHaveLength(1);
+    expect(caseDoc.fastApiResponse.receivedAt).toBeDefined();
+    expect(caseDoc.timelineEvents).toHaveLength(1);
 
     const edges = await Edge.find({ associatedCases: "CASE-TEST-NEW-01" }).lean();
     expect(edges.length).toBeGreaterThan(0);
@@ -77,7 +90,7 @@ describe("Integration Tests - FastAPI enhancements", () => {
     expect(edge.eventTime).toBe("12:00:00");
     expect(edge.eventType).toBe("financial_transfer");
     expect(edge.systemStatus).toBe("approved");
-    expect(edge.reviewStatus).toBe("verified");
+    expect(edge.reviewStatus).toBeUndefined();
 
     const entities = await Entity.find({ associatedCases: "CASE-TEST-NEW-01" }).lean();
     const person = entities.find(e => e.type === "PERSON");
@@ -102,7 +115,9 @@ describe("Integration Tests - FastAPI enhancements", () => {
     
     expect(payload.caseHistory).toBeDefined();
     expect(payload.caseHistory.length).toBeGreaterThan(0);
-    expect(payload.caseHistory.some(h => h.canonicalId === "PERSON-001")).toBe(true);
+    expect(payload.caseHistory.some(h =>
+      h.canonicalId === "phone:9876543210" && h.lastSeenCaseId === "CASE-TEST-NEW-01"
+    )).toBe(true);
 
     expect(payload.retrievalContext).toBeDefined();
     expect(payload.retrievalContext.some(ctx => ctx.caseId === "CASE-TEST-NEW-01")).toBe(true);

@@ -14,5 +14,7 @@ describe("Case persistence schema", () => {
   test("stores retrieval summary and original CSV records", () => {
     expect(Case.schema.path("retrievalSummary")).toBeDefined();
     expect(Case.schema.path("csvRecords")).toBeDefined();
+    expect(Case.schema.path("caseHistory")).toBeDefined();
+    expect(Case.schema.path("fastApiResponse")).toBeDefined();
   });
 });
