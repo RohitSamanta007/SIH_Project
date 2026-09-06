@@ -3,6 +3,7 @@ import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/re
 import { BrowserRouter } from 'react-router-dom';
 import React from 'react';
 import apiClient from '../api/apiClient';
+import { caseDetailPath } from '../utils/caseNavigation.js';
 import { 
   SimilarCasesPanel, 
   TimelineEventRow, 
@@ -10,6 +11,8 @@ import {
   EdgeReviewDropdown,
   ManualRelationshipForm,
   CrossCaseRecurrenceAlert,
+  CrossCaseEvidenceDetail,
+  GraphEvidenceToggle,
 } from '../pages/CaseDetailPage';
 
 afterEach(() => {
@@ -26,6 +29,12 @@ vi.mock('../api/apiClient', () => ({
 }));
 
 describe('CaseDetailPage Components', () => {
+  it('builds historical navigation from a real encoded logical caseId only', () => {
+    expect(caseDetailPath('ALPHA 01')).toBe('/cases/ALPHA%2001');
+    expect(caseDetailPath(undefined)).toBeNull();
+    expect(caseDetailPath('   ')).toBeNull();
+  });
+
   it('renders exact recurrence identifiers and navigates with the real logical caseId', () => {
     const navigate = vi.fn();
     render(<CrossCaseRecurrenceAlert
@@ -70,6 +79,70 @@ describe('CaseDetailPage Components', () => {
     expect(screen.getByText('ALPHA-03: Referenced case unavailable')).toBeDefined();
     expect(screen.queryByRole('button', { name: /ALPHA-03/ })).toBeNull();
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('clicking a recurrence enables the overlay and highlights the exact current node', () => {
+    const onHighlightMatch = vi.fn();
+    render(<CrossCaseRecurrenceAlert
+      currentCaseId="ALPHA-NEW"
+      navigate={vi.fn()}
+      onHighlightMatch={onHighlightMatch}
+      nodes={[{ canonicalId: 'phone:9050011122', aliases: ['9050011122'] }]}
+      patterns={[{
+        patternType: 'cross_case_recurrence',
+        metadata: { exactMatches: [{
+          canonicalId: 'phone:9050011122',
+          type: 'phone',
+          historicalCases: [{ caseId: 'ALPHA-01', available: true }],
+        }] },
+      }]}
+    />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show historical graph evidence for phone:9050011122' }));
+    expect(onHighlightMatch).toHaveBeenCalledWith('phone:9050011122');
+  });
+
+  it('provides an accessible cross-case evidence toggle and disables it without evidence', () => {
+    const onChange = vi.fn();
+    const { rerender } = render(<GraphEvidenceToggle available={false} shown={false} onChange={onChange} />);
+    const evidenceButton = screen.getByRole('button', { name: 'Show cross-case evidence' });
+    expect(evidenceButton.disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Current case' }).getAttribute('aria-pressed')).toBe('true');
+
+    rerender(<GraphEvidenceToggle available shown={false} onChange={onChange} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Show cross-case evidence' }));
+    expect(onChange).toHaveBeenCalledWith(true);
+  });
+
+  it('shows historical evidence details and opens the real logical caseId safely', () => {
+    const onOpenCase = vi.fn();
+    const evidence = {
+      matchedIdentifier: 'phone:9050011122',
+      historicalCaseId: 'ALPHA 01',
+      historicalEntity: { name: 'Rafiq Mondal' },
+      historicalRelationship: {
+        edgeType: 'uses_phone',
+        modelStatus: 'verified',
+        confidence: 0.95,
+        relationReason: 'Witness identified Rafiq using phone 9050011122.',
+        eventDate: '2026-03-05',
+        evidence: [{ sourceReportId: 'OLD_TEXT_0', matchedField: 'phone', record: { phone: '9050011122' } }],
+      },
+    };
+    const { rerender } = render(<CrossCaseEvidenceDetail
+      evidence={evidence}
+      unavailable={false}
+      onOpenCase={onOpenCase}
+      onClose={vi.fn()}
+    />);
+
+    expect(screen.getByText('Historical cross-case evidence')).toBeDefined();
+    expect(screen.getByText('Witness identified Rafiq using phone 9050011122.')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Open historical case' }));
+    expect(onOpenCase).toHaveBeenCalledWith('ALPHA 01');
+
+    rerender(<CrossCaseEvidenceDetail evidence={evidence} unavailable onOpenCase={onOpenCase} onClose={vi.fn()} />);
+    expect(screen.getByRole('alert').textContent).toContain('Referenced case unavailable');
   });
 
   it('navigates using matchedCaseId and never an undefined fallback', async () => {

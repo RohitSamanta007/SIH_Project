@@ -2,6 +2,11 @@ import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import ForceGraph3D from 'react-force-graph-3d';
 import * as THREE from 'three';
 import SpriteText from 'three-spritetext';
+import {
+  buildRenderableGraphData,
+  historicalNodeLabel,
+  isDashedConnectionType,
+} from './graphPresentation.js';
 
 // 1. NODE COLOR CODING
 const NODE_COLORS = { 
@@ -23,6 +28,7 @@ const EDGE_COLORS = {
   verified: "#059669", // Emerald (Solid)
   possible_connection: "#d97706", // Dark Amber (Dashed)
   cross_connection: "#3b82f6", // Blue (Cross-case link)
+  historical_evidence: "#7c3aed", // Read-only evidence from an earlier case
   unverified: "#dc2626",
   unknown: "#9ca3af",
   default: "#9ca3af" // Grey (Unverified/Unknown)
@@ -37,32 +43,6 @@ const EDGE_COLORS = {
  * A recurrence pattern is entity-level metadata and never changes edge
  * rendering. Only an explicit investigator/model edge status can do that.
  */
-export function deriveDisplayConnectionType(edge) {
-  // 1. Manual review overrides
-  const review = edge.reviewStatus;
-  if (review && review !== 'unspecified') {
-    if (review === 'verified') return 'verified';
-    if (review === 'possible_connection') return 'possible_connection';
-    if (review === 'cross_connection') return 'cross_connection';
-    if (review === 'unverified') return 'unverified';
-    if (review === 'unknown') return 'unknown';
-  }
-  
-  // 2. Check system or guardrail status
-  const rawStatus = edge.effectiveStatus || edge.systemStatus || edge.guardrailStatus;
-  
-  // 3. Preserve the model's own classification for this exact edge.
-  // An entity may be part of another case while its local connection remains
-  // independently verified, possible, unverified, or unknown.
-  if (rawStatus === 'verified' || rawStatus === 'approved') return 'verified';
-  if (rawStatus === 'possible_connection') return 'possible_connection';
-  if (rawStatus === 'unverified' || rawStatus === 'rejected') return 'unverified';
-  if (rawStatus === 'unknown' || rawStatus === 'unknown_connection') return 'unknown';
-  if (rawStatus === 'cross_case' || rawStatus === 'cross_connection') return 'cross_connection';
-
-  return 'unknown';
-}
-
 const NetworkGraph = ({
   graphData,
   onNodeClick,
@@ -70,7 +50,9 @@ const NetworkGraph = ({
   onBackgroundClick,
   activeTimeRange,
   currentCaseId,
-  selectedEdgeId
+  selectedEdgeId,
+  showCrossCaseEvidence = false,
+  focusedNodeId = null,
 }) => {
   const fgRef = useRef();
   const containerRef = useRef();
@@ -111,32 +93,8 @@ const NetworkGraph = ({
   // ALL edges are included — no guardrailStatus filtering here.
   // displayConnectionType is derived per edge for visual styling only.
   const formattedData = useMemo(() => {
-    if (!graphData || !graphData.nodes) return { nodes: [], links: [] };
-
-    let nodes = graphData.nodes.map(n => ({ ...n, id: n.id || n.canonicalId, degree: 0 }));
-
-    const links = (graphData.edges || []).map(e => {
-      const mapped = {
-        ...e,
-        id: e.id || e.edgeId,
-        source: e.source || e.sourceEntityId,
-        target: e.target || e.targetEntityId,
-      };
-      // Attach display classification — does NOT overwrite guardrailStatus
-      mapped.displayConnectionType = deriveDisplayConnectionType(mapped);
-      return mapped;
-    });
-
-    // Calculate degree for node sizing
-    links.forEach(link => {
-      const sourceNode = nodes.find(n => n.id === link.source || n.id === link.source?.id);
-      const targetNode = nodes.find(n => n.id === link.target || n.id === link.target?.id);
-      if (sourceNode) sourceNode.degree += 1;
-      if (targetNode) targetNode.degree += 1;
-    });
-
-    return { nodes, links };
-  }, [graphData]);
+    return buildRenderableGraphData(graphData, showCrossCaseEvidence);
+  }, [graphData, showCrossCaseEvidence]);
 
   // Determine whether ANY entity/edge in this dataset is actually tagged with
   // currentCaseId. If nothing matches (e.g. associatedCases is missing/empty
@@ -151,11 +109,13 @@ const NetworkGraph = ({
   }, [formattedData, currentCaseId]);
 
   const isNodeInActiveContext = useCallback((node) => {
+    if (node?.isHistoricalEvidence) return true;
     if (!currentCaseId || !hasAnyCaseMatch) return true;
     return (node.associatedCases || []).includes(currentCaseId);
   }, [currentCaseId, hasAnyCaseMatch]);
 
   const isLinkInActiveContext = useCallback((link) => {
+    if (link?.isCrossCaseEvidence) return true;
     if (!currentCaseId || !hasAnyCaseMatch) return true;
     return (link.associatedCases || []).includes(currentCaseId);
   }, [currentCaseId, hasAnyCaseMatch]);
@@ -164,7 +124,10 @@ const NetworkGraph = ({
   const { highlightNodes, highlightLinks } = useMemo(() => {
     const nodes = new Set();
     const links = new Set();
-    const activeFocusNode = hoverNode || selectedNode;
+    const focusedNode = focusedNodeId
+      ? formattedData.nodes.find((node) => node.id === focusedNodeId)
+      : null;
+    const activeFocusNode = hoverNode || selectedNode || focusedNode;
     
     if (activeFocusNode && formattedData) {
       nodes.add(activeFocusNode.id);
@@ -188,7 +151,7 @@ const NetworkGraph = ({
       });
     }
     return { highlightNodes: nodes, highlightLinks: links };
-  }, [hoverNode, selectedNode, selectedEdgeId, formattedData]);
+  }, [hoverNode, selectedNode, selectedEdgeId, focusedNodeId, formattedData]);
 
   const getNodeColor = useCallback((type) => {
     const t = type?.toLowerCase();
@@ -205,8 +168,8 @@ const NetworkGraph = ({
 
   // Custom Node Renderer
   const nodeThreeObject = useCallback(node => {
-    const activeFocus = hoverNode || selectedNode || selectedEdgeId;
-    const isFocused = (hoverNode && hoverNode.id === node.id) || (selectedNode && selectedNode.id === node.id);
+    const activeFocus = hoverNode || selectedNode || selectedEdgeId || focusedNodeId;
+    const isFocused = (hoverNode && hoverNode.id === node.id) || (selectedNode && selectedNode.id === node.id) || focusedNodeId === node.id;
     const isHighlighted = activeFocus ? highlightNodes.has(node.id) : true;
     const isActiveContext = isNodeInActiveContext(node);
     
@@ -215,7 +178,7 @@ const NetworkGraph = ({
     let opacity = isHighlighted ? 1.0 : 0.4;
     if (!isActiveContext && !isFocused && !isHighlighted) opacity = Math.max(opacity, 0.55);
 
-    let color = getNodeColor(node.type);
+    let color = node.isHistoricalEvidence ? '#6b7280' : getNodeColor(node.type);
     if (!isActiveContext && !isHighlighted) color = '#9ca3af';
 
     // Cross-case nodes (in this case but also others) get a subtle purple emissive glow
@@ -248,6 +211,14 @@ const NetworkGraph = ({
     const sphere = new THREE.Mesh(geometry, material);
     group.add(sphere);
 
+    if (node.isHistoricalEvidence) {
+      const historicalOutline = new THREE.Mesh(
+        new THREE.SphereGeometry(radius + 1.1, 16, 16),
+        new THREE.MeshBasicMaterial({ color: '#7c3aed', wireframe: true, transparent: true, opacity: 0.65 })
+      );
+      group.add(historicalOutline);
+    }
+
     // Outline for selected node
     if (selectedNode && selectedNode.id === node.id) {
       const outlineGeo = new THREE.SphereGeometry(radius + 1.5, 32, 32);
@@ -269,6 +240,7 @@ const NetworkGraph = ({
       labelText = labelText.substring(0, 19) + '...';
     }
 
+    labelText = historicalNodeLabel(node, labelText);
     const sprite = new SpriteText(labelText);
     // Keep label text dark/readable regardless of active-context state
     sprite.color = isFocused ? '#000000' : '#1f2937';
@@ -296,7 +268,7 @@ const NetworkGraph = ({
     group.add(sprite);
 
     return group;
-  }, [hoverNode, selectedNode, selectedEdgeId, highlightNodes, getNodeColor, isNodeInActiveContext]);
+  }, [hoverNode, selectedNode, selectedEdgeId, focusedNodeId, highlightNodes, getNodeColor, isNodeInActiveContext]);
 
   // Custom Edge Creation using Cylinders for thickness
   const linkThreeObject = useCallback(link => {
@@ -304,6 +276,7 @@ const NetworkGraph = ({
     const isVerified = dct === 'verified';
     const isPossible = dct === 'possible_connection';
     const isCrossCase = dct === 'cross_connection';
+    const isHistoricalEvidence = dct === 'historical_evidence';
     const isUnverified = dct === 'unverified';
     const isUnknown = dct === 'unknown';
 
@@ -311,11 +284,12 @@ const NetworkGraph = ({
     if (isVerified) color = EDGE_COLORS.verified;
     if (isPossible) color = EDGE_COLORS.possible_connection;
     if (isCrossCase) color = EDGE_COLORS.cross_connection;
+    if (isHistoricalEvidence) color = EDGE_COLORS.historical_evidence;
     if (isUnverified) color = EDGE_COLORS.unverified;
     // unknown stays as EDGE_COLORS.default (gray)
 
     // Thicker lines for verified/cross, thinner for possible/unknown
-    const radius = isVerified ? 1.0 : isCrossCase ? 1.2 : isPossible ? 0.7 : 0.5;
+    const radius = isVerified ? 1.0 : isCrossCase ? 1.2 : isPossible ? 0.7 : isHistoricalEvidence ? 0.55 : 0.5;
     const geometry = new THREE.CylinderGeometry(radius, radius, 1, 8);
     geometry.translate(0, 0.5, 0);
 
@@ -326,7 +300,7 @@ const NetworkGraph = ({
     });
 
     // Dashed texture for possible and cross-case connections
-    if (isPossible || isCrossCase) {
+    if (isDashedConnectionType(dct)) {
       const canvas = document.createElement('canvas');
       canvas.width = 4;
       canvas.height = 64;
@@ -336,7 +310,7 @@ const NetworkGraph = ({
       const texture = new THREE.CanvasTexture(canvas);
       texture.wrapS = THREE.RepeatWrapping;
       texture.wrapT = THREE.RepeatWrapping;
-      texture.repeat.set(1, isCrossCase ? 15 : 10);
+      texture.repeat.set(1, (isCrossCase || isHistoricalEvidence) ? 15 : 10);
       material.map = texture;
       material.alphaTest = 0.5;
     }
@@ -364,7 +338,7 @@ const NetworkGraph = ({
     }
 
     const inTimeRange = isEdgeInTimeRange(link, activeTimeRange);
-    const activeFocus = hoverNode || selectedNode || selectedEdgeId;
+    const activeFocus = hoverNode || selectedNode || selectedEdgeId || focusedNodeId;
     const isHighlighted = activeFocus ? highlightLinks.has(link.id) : true;
     const isActiveContext = isLinkInActiveContext(link);
 
@@ -383,6 +357,7 @@ const NetworkGraph = ({
       if (dct === 'verified') targetColor.set(EDGE_COLORS.verified);
       else if (dct === 'possible_connection') targetColor.set(EDGE_COLORS.possible_connection);
       else if (dct === 'cross_connection') targetColor.set(EDGE_COLORS.cross_connection);
+      else if (dct === 'historical_evidence') targetColor.set(EDGE_COLORS.historical_evidence);
       else if (dct === 'unverified') targetColor.set(EDGE_COLORS.unverified);
       // unknown stays gray
     } else {
@@ -395,7 +370,7 @@ const NetworkGraph = ({
 
     mesh.material.color = targetColor;
     return true;
-  }, [hoverNode, selectedNode, selectedEdgeId, highlightLinks, activeTimeRange, isEdgeInTimeRange, isLinkInActiveContext]);
+  }, [hoverNode, selectedNode, selectedEdgeId, focusedNodeId, highlightLinks, activeTimeRange, isEdgeInTimeRange, isLinkInActiveContext]);
 
 
   // Graph Controls
@@ -433,7 +408,7 @@ const NetworkGraph = ({
 
   const handleNodeClick = (node) => {
     setSelectedNode(node);
-    if (onNodeClick) onNodeClick(node.id);
+    if (onNodeClick) onNodeClick(node.id, node);
   };
 
   if (!formattedData.nodes.length) {
@@ -474,7 +449,7 @@ const NetworkGraph = ({
           linkThreeObject={linkThreeObject}
           linkPositionUpdate={linkPositionUpdate}
           onNodeClick={handleNodeClick}
-          onLinkClick={link => onEdgeClick && onEdgeClick(link.id)}
+          onLinkClick={link => onEdgeClick && onEdgeClick(link.id, link)}
           onNodeHover={node => setHoverNode(node || null)}
           onBackgroundClick={() => {
             setSelectedNode(null);
@@ -486,7 +461,9 @@ const NetworkGraph = ({
           nodeLabel={node => {
             const alias = Array.isArray(node.aliases) && node.aliases.length > 0 ? node.aliases[0] : 'Unknown';
             const color = getNodeColor(node.type);
-            const crossCaseBadge = node.associatedCases && node.associatedCases.length > 1 
+            const crossCaseBadge = node.isHistoricalEvidence
+              ? `<div style="margin-top: 6px; padding: 2px 6px; background: #f5f3ff; color: #6d28d9; border: 1px dashed #8b5cf6; font-size: 10px; border-radius: 4px; display: inline-block;">Historical · ${node.historicalCaseName || 'case'}</div>`
+              : node.associatedCases && node.associatedCases.length > 1
               ? `<div style="margin-top: 6px; padding: 2px 6px; background: #ede9fe; color: #6d28d9; border: 1px solid #c4b5fd; font-size: 10px; border-radius: 4px; display: inline-block;">Appears in ${node.associatedCases.length} cases</div>`
               : '';
 
@@ -506,6 +483,9 @@ const NetworkGraph = ({
               </div>
             `;
           }}
+          linkLabel={link => link.isCrossCaseEvidence
+            ? `Exact Historical Cross-Case Evidence · Shared ${link.crossCaseEvidence?.identifierType || 'identifier'} · Case ${link.historicalCaseId || 'unavailable'}`
+            : (link.edgeType || 'Relationship')}
         />
       )}
       
@@ -531,9 +511,15 @@ const NetworkGraph = ({
           <span>Possible Connection</span>
         </div>
         <div className="flex items-center gap-2 mb-2">
-          <div className="w-8 border-b-2 border-dashed" style={{borderColor: EDGE_COLORS.cross_case}}></div>
+          <div className="w-8 border-b-2 border-dashed" style={{borderColor: EDGE_COLORS.cross_connection}}></div>
           <span>Cross-Case Connection</span>
         </div>
+        {showCrossCaseEvidence && (
+          <div className="flex items-center gap-2 mb-2">
+            <div className="w-8 border-b-2 border-dashed" style={{borderColor: EDGE_COLORS.historical_evidence}}></div>
+            <span>Exact Historical Cross-Case Evidence</span>
+          </div>
+        )}
         <div className="flex items-center gap-2">
           <div className="w-8 h-0.5 opacity-50 bg-gray-400"></div>
           <span>Unknown Connection</span>

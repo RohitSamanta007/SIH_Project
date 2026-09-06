@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { clearStoredAuthSession, SESSION_EXPIRED_EVENT } from '../state/authSession.js';
 
 /**
  * Centralized API client.
@@ -34,8 +35,8 @@ apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401 && sessionStorage.getItem('auth_token')) {
-      sessionStorage.removeItem('auth_token');
-      sessionStorage.removeItem('auth_user');
+      clearStoredAuthSession();
+      window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
     }
     return Promise.reject(error);
   }
