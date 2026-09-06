@@ -24,6 +24,63 @@ export const historicalNodeLabel = (node, baseLabel) =>
     ? `${baseLabel} · Historical ${node.historicalCaseName || 'case'}`
     : baseLabel;
 
+const CANDIDATE_IDENTITY_IDENTIFIER_TYPES = new Set([
+  'phone', 'address', 'vehicle', 'email', 'account',
+]);
+
+export function normalizeEntityName(value) {
+  return typeof value === 'string'
+    ? value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ')
+    : '';
+}
+
+function levenshteinDistance(left, right) {
+  if (!left.length) return right.length;
+  if (!right.length) return left.length;
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const current = [leftIndex];
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      current[rightIndex] = Math.min(
+        current[rightIndex - 1] + 1,
+        previous[rightIndex] + 1,
+        previous[rightIndex - 1] + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
+      );
+    }
+    for (let index = 0; index < current.length; index += 1) previous[index] = current[index];
+  }
+  return previous[right.length];
+}
+
+export function entityNameSimilarity(left, right) {
+  const normalizedLeft = normalizeEntityName(left);
+  const normalizedRight = normalizeEntityName(right);
+  if (!normalizedLeft || !normalizedRight) return 0;
+  const longest = Math.max(normalizedLeft.length, normalizedRight.length);
+  return longest ? 1 - (levenshteinDistance(normalizedLeft, normalizedRight) / longest) : 1;
+}
+
+function primaryEntityName(entity) {
+  const alias = Array.isArray(entity?.aliases)
+    ? entity.aliases.find((value) => typeof value === 'string' && value.trim())
+    : null;
+  return alias || entity?.name || '';
+}
+
+export function findCandidateIdentityMerge(nodes, evidence, threshold = 0.9) {
+  const historical = evidence?.historicalEntity;
+  if (!historical || String(historical.type || '').toLowerCase() !== 'person') return null;
+  if (!CANDIDATE_IDENTITY_IDENTIFIER_TYPES.has(String(evidence?.identifierType || '').toLowerCase())) return null;
+  const historicalName = primaryEntityName(historical);
+  const candidates = (Array.isArray(nodes) ? nodes : [])
+    .filter((node) => !node?.isHistoricalEvidence && String(node?.type || '').toLowerCase() === 'person')
+    .map((node) => ({ node, similarity: entityNameSimilarity(primaryEntityName(node), historicalName) }))
+    .filter((candidate) => candidate.similarity >= threshold)
+    .sort((left, right) => right.similarity - left.similarity || String(left.node.id).localeCompare(String(right.node.id)));
+  return candidates[0] || null;
+}
+
 export function buildRenderableGraphData(graphData, showCrossCaseEvidence = false) {
   const nodes = (Array.isArray(graphData?.nodes) ? graphData.nodes : []).map((node) => ({
     ...node,
@@ -44,7 +101,26 @@ export function buildRenderableGraphData(graphData, showCrossCaseEvidence = fals
     for (const evidence of Array.isArray(graphData?.crossCaseEvidence) ? graphData.crossCaseEvidence : []) {
       const historical = evidence?.historicalEntity;
       if (!evidence?.id || !evidence?.currentEntityId || !historical?.id || !nodeIds.has(evidence.currentEntityId)) continue;
-      if (!nodeIds.has(historical.id)) {
+      const candidateMerge = findCandidateIdentityMerge(nodes, evidence);
+      const overlaySourceId = candidateMerge?.node?.id || historical.id;
+      if (candidateMerge?.node) {
+        const mergeRecord = {
+          similarity: candidateMerge.similarity,
+          historicalCaseId: evidence.historicalCaseId,
+          historicalCaseName: evidence.historicalCaseName,
+          historicalEntityId: historical.id,
+          matchedIdentifier: evidence.matchedIdentifier,
+        };
+        const existingMerges = Array.isArray(candidateMerge.node.candidateIdentityMerges)
+          ? candidateMerge.node.candidateIdentityMerges
+          : [];
+        if (!existingMerges.some((item) =>
+          item.historicalEntityId === mergeRecord.historicalEntityId &&
+          item.matchedIdentifier === mergeRecord.matchedIdentifier
+        )) {
+          candidateMerge.node.candidateIdentityMerges = [...existingMerges, mergeRecord];
+        }
+      } else if (!nodeIds.has(historical.id)) {
         nodes.push({
           ...historical,
           id: historical.id,
@@ -62,7 +138,7 @@ export function buildRenderableGraphData(graphData, showCrossCaseEvidence = fals
       if (!linkIds.has(evidence.id)) {
         links.push({
           id: evidence.id,
-          source: historical.id,
+          source: overlaySourceId,
           target: evidence.currentEntityId,
           edgeType: 'historical_cross_case_evidence',
           isCrossCaseEvidence: true,
@@ -71,6 +147,9 @@ export function buildRenderableGraphData(graphData, showCrossCaseEvidence = fals
           matchedIdentifier: evidence.matchedIdentifier,
           historicalRelationship: evidence.historicalRelationship,
           crossCaseEvidence: evidence,
+          candidateIdentityMerge: Boolean(candidateMerge),
+          identitySimilarity: candidateMerge?.similarity || null,
+          historicalEntityId: historical.id,
         });
         linkIds.add(evidence.id);
       }

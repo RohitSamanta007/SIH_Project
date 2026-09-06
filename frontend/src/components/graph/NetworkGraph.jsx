@@ -464,7 +464,10 @@ const NetworkGraph = ({
             const crossCaseBadge = node.isHistoricalEvidence
               ? `<div style="margin-top: 6px; padding: 2px 6px; background: #f5f3ff; color: #6d28d9; border: 1px dashed #8b5cf6; font-size: 10px; border-radius: 4px; display: inline-block;">Historical · ${node.historicalCaseName || 'case'}</div>`
               : node.associatedCases && node.associatedCases.length > 1
-              ? `<div style="margin-top: 6px; padding: 2px 6px; background: #ede9fe; color: #6d28d9; border: 1px solid #c4b5fd; font-size: 10px; border-radius: 4px; display: inline-block;">Appears in ${node.associatedCases.length} cases</div>`
+                ? `<div style="margin-top: 6px; padding: 2px 6px; background: #ede9fe; color: #6d28d9; border: 1px solid #c4b5fd; font-size: 10px; border-radius: 4px; display: inline-block;">Appears in ${node.associatedCases.length} cases</div>`
+                : '';
+            const candidateMergeBadge = Array.isArray(node.candidateIdentityMerges) && node.candidateIdentityMerges.length
+              ? `<div style="margin-top: 6px; padding: 2px 6px; background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; font-size: 10px; border-radius: 4px; display: inline-block;">Candidate identity merge · ${Math.round(Math.max(...node.candidateIdentityMerges.map(item => item.similarity || 0)) * 100)}%</div>`
               : '';
 
             return `
@@ -476,6 +479,7 @@ const NetworkGraph = ({
                   ${alias}
                 </div>
                 ${crossCaseBadge}
+                ${candidateMergeBadge}
                 <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px solid #e5e7eb; padding-top: 8px; margin-top: 8px;">
                   <span style="color: #4b5563;">Connections</span>
                   <span style="background: #f3f4f6; padding: 2px 6px; border-radius: 4px; font-weight: bold;">${node.degree}</span>

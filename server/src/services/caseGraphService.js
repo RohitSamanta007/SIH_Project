@@ -51,7 +51,7 @@ const mapEdge = (edge) => ({
   createdAt: edge.createdAt,
 });
 
-const decorateRecurrencePatterns = async (patterns, currentCaseId) => {
+const decorateRecurrencePatterns = async (patterns, currentCaseId, currentCreatedAt = null) => {
   const rows = Array.isArray(patterns) ? patterns : [];
   const referencedIds = [...new Set(rows.flatMap((pattern) => {
     if (pattern?.patternType !== "cross_case_recurrence") return [];
@@ -62,7 +62,10 @@ const decorateRecurrencePatterns = async (patterns, currentCaseId) => {
   const availableIds = new Set();
   if (referencedIds.length) {
     const availableCases = await Case.find(
-      { caseId: { $in: referencedIds } },
+      {
+        caseId: { $in: referencedIds },
+        ...(currentCreatedAt ? { createdAt: { $lt: currentCreatedAt } } : {}),
+      },
       { caseId: 1 }
     ).lean();
     for (const caseDoc of availableCases || []) {
@@ -117,7 +120,7 @@ const parseExactHistoryItem = (item, currentCaseId) => {
  * entity in the referenced historical case. No database edge is created and
  * no model or investigator status is changed.
  */
-const buildCrossCaseEvidence = async (currentCaseId, caseHistory) => {
+const buildCrossCaseEvidence = async (currentCaseId, caseHistory, currentCreatedAt = null) => {
   const parsed = [];
   const seenHistory = new Set();
   const caseCountByIdentifier = new Map();
@@ -137,11 +140,20 @@ const buildCrossCaseEvidence = async (currentCaseId, caseHistory) => {
 
   const referencedCaseIds = [...new Set(parsed.map((match) => match.historicalCaseId))];
   const historicalCases = await Case.find(
-    { caseId: { $in: referencedCaseIds, $ne: currentCaseId } },
-    { caseId: 1, title: 1 }
+    {
+      caseId: { $in: referencedCaseIds, $ne: currentCaseId },
+      ...(currentCreatedAt ? { createdAt: { $lt: currentCreatedAt } } : {}),
+    },
+    { caseId: 1, title: 1, createdAt: 1 }
   ).lean();
-  const availableCaseIds = new Set((historicalCases || []).map((item) => item.caseId).filter(Boolean));
-  const historicalCaseNameById = new Map((historicalCases || []).map((item) => [
+  const cutoffTime = currentCreatedAt ? new Date(currentCreatedAt).getTime() : null;
+  const eligibleHistoricalCases = (historicalCases || []).filter((item) => {
+    if (!Number.isFinite(cutoffTime)) return true;
+    const candidateTime = item?.createdAt ? new Date(item.createdAt).getTime() : Number.NaN;
+    return Number.isFinite(candidateTime) && candidateTime < cutoffTime;
+  });
+  const availableCaseIds = new Set(eligibleHistoricalCases.map((item) => item.caseId).filter(Boolean));
+  const historicalCaseNameById = new Map(eligibleHistoricalCases.map((item) => [
     item.caseId,
     typeof item.title === "string" && item.title.trim() ? item.title.trim() : "Historical case",
   ]));
@@ -273,11 +285,19 @@ const getCaseGraph = async (caseId) => {
     $or: [{ associatedCases: normalizedCaseId }, { canonicalId: { $in: endpointIds } }],
   }).lean();
   const patterns = await Pattern.find({ caseId: normalizedCaseId }).lean();
-  const decoratedPatterns = await decorateRecurrencePatterns(patterns, normalizedCaseId);
+  const decoratedPatterns = await decorateRecurrencePatterns(patterns, normalizedCaseId, caseDoc.createdAt);
   const exactCaseHistory = Array.isArray(caseDoc.caseHistory) && caseDoc.caseHistory.length
     ? caseDoc.caseHistory
-    : await buildExactCaseHistory(normalizedCaseId, caseDoc.normalizedIdentifiers || {});
-  const crossCaseEvidence = await buildCrossCaseEvidence(normalizedCaseId, exactCaseHistory);
+    : await buildExactCaseHistory(
+      normalizedCaseId,
+      caseDoc.normalizedIdentifiers || {},
+      { beforeCreatedAt: caseDoc.createdAt }
+    );
+  const crossCaseEvidence = await buildCrossCaseEvidence(
+    normalizedCaseId,
+    exactCaseHistory,
+    caseDoc.createdAt
+  );
 
   const nodes = entities.map((entity) => ({
     canonicalId: entity.canonicalId,

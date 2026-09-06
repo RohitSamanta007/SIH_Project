@@ -92,7 +92,11 @@ const processCaseThroughFastApi = async (normalizedCase, options = {}) => {
   //    Non-fatal: if lookup fails, proceed with empty history so FastAPI still runs.
   let caseHistory = [];
   try {
-    caseHistory = await buildExactCaseHistory(caseId, normalizedIdentifiers);
+    const existingCase = await Case.findOne({ caseId }, { createdAt: 1 }).lean();
+    const historyOptions = existingCase?.createdAt
+      ? { beforeCreatedAt: existingCase.createdAt }
+      : undefined;
+    caseHistory = await buildExactCaseHistory(caseId, normalizedIdentifiers, historyOptions);
     console.log(`[caseProcessingService] caseHistory entries: ${caseHistory.length}`);
   } catch (err) {
     console.error("[caseProcessingService] buildExactCaseHistory failed — empty history:", err.message);

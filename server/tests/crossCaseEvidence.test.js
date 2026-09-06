@@ -135,4 +135,22 @@ describe("cross-case historical graph evidence", () => {
     expect(await buildCrossCaseEvidence("ALPHA-04", history)).toEqual([]);
     expect(Entity.find).toHaveBeenCalledTimes(2);
   });
+
+  test("never renders a later case as historical evidence for an earlier case", async () => {
+    const currentCreatedAt = new Date("2026-04-01T10:00:00.000Z");
+    Case.find.mockReturnValue(leanResult([{
+      caseId: "ALPHA-01",
+      title: "Later case",
+      createdAt: new Date("2026-04-02T10:00:00.000Z"),
+    }]));
+
+    const result = await buildCrossCaseEvidence("EARLIEST-CASE", history, currentCreatedAt);
+
+    expect(result).toEqual([]);
+    expect(Entity.find).not.toHaveBeenCalled();
+    expect(Case.find.mock.calls[0][0]).toEqual({
+      caseId: { $in: ["ALPHA-01"], $ne: "EARLIEST-CASE" },
+      createdAt: { $lt: currentCreatedAt },
+    });
+  });
 });

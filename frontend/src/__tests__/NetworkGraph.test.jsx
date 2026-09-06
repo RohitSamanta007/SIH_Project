@@ -8,6 +8,8 @@ import {
   isDashedConnectionType,
   historicalNodeLabel,
   shouldShowCrossCaseEvidenceByDefault,
+  entityNameSimilarity,
+  findCandidateIdentityMerge,
 } from '../components/graph/graphPresentation.js';
 
 afterEach(() => {
@@ -162,5 +164,71 @@ describe('NetworkGraph Component', () => {
     expect(rendered.links.filter((link) => link.target === 'phone:9050011122')).toHaveLength(2);
     expect(rendered.links.filter((link) => link.target === 'vehicle:WB19R8842')).toHaveLength(1);
     expect(rendered.links.every((link) => link.displayConnectionType === 'historical_evidence')).toBe(true);
+  });
+
+  it('visually merges a historical person into the current person at 90% name similarity plus an exact identifier', () => {
+    const evidence = {
+      id: 'cross:CURRENT:vehicle:WB19R8842:OLD:edge-1',
+      currentEntityId: 'vehicle:WB19R8842',
+      matchedIdentifier: 'vehicle:WB19R8842',
+      identifierType: 'vehicle',
+      historicalCaseId: 'OLD',
+      historicalCaseName: 'Older case',
+      historicalEntity: {
+        id: 'historical:OLD:person:rafiq-old',
+        name: 'Rafiq Mondol',
+        type: 'person',
+      },
+      historicalRelationship: { edgeId: 'edge-1', evidence: [{}] },
+    };
+    const graphData = {
+      nodes: [
+        { canonicalId: 'person:rafiq-current', type: 'person', aliases: ['Rafiq Mondal'] },
+        { canonicalId: 'vehicle:WB19R8842', type: 'vehicle', aliases: ['WB-19-R-8842'] },
+      ],
+      edges: [],
+      crossCaseEvidence: [evidence],
+    };
+
+    expect(entityNameSimilarity('Rafiq Mondal', 'Rafiq Mondol')).toBeGreaterThanOrEqual(0.9);
+    expect(findCandidateIdentityMerge(
+      graphData.nodes.map((node) => ({ ...node, id: node.canonicalId })),
+      evidence,
+    )?.node.id).toBe('person:rafiq-current');
+
+    const rendered = buildRenderableGraphData(graphData, true);
+    expect(rendered.nodes.map((node) => node.id)).not.toContain('historical:OLD:person:rafiq-old');
+    expect(rendered.nodes.find((node) => node.id === 'person:rafiq-current').candidateIdentityMerges).toHaveLength(1);
+    expect(rendered.links[0]).toEqual(expect.objectContaining({
+      source: 'person:rafiq-current',
+      target: 'vehicle:WB19R8842',
+      candidateIdentityMerge: true,
+      displayConnectionType: 'historical_evidence',
+    }));
+    expect(rendered.links[0]).not.toHaveProperty('reviewStatus');
+  });
+
+  it('keeps the historical person separate when the normalized-name similarity is below 90%', () => {
+    const evidence = {
+      id: 'cross:CURRENT:phone:9050011122:OLD:edge-2',
+      currentEntityId: 'phone:9050011122',
+      matchedIdentifier: 'phone:9050011122',
+      identifierType: 'phone',
+      historicalCaseId: 'OLD',
+      historicalEntity: { id: 'historical:OLD:person:other', name: 'Another Person', type: 'person' },
+      historicalRelationship: { edgeId: 'edge-2', evidence: [{}] },
+    };
+    const rendered = buildRenderableGraphData({
+      nodes: [
+        { canonicalId: 'person:rafiq', type: 'person', aliases: ['Rafiq Mondal'] },
+        { canonicalId: 'phone:9050011122', type: 'phone' },
+      ],
+      edges: [],
+      crossCaseEvidence: [evidence],
+    }, true);
+
+    expect(rendered.nodes.map((node) => node.id)).toContain('historical:OLD:person:other');
+    expect(rendered.links[0].source).toBe('historical:OLD:person:other');
+    expect(rendered.links[0].candidateIdentityMerge).toBe(false);
   });
 });
